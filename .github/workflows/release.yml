@@ -1,0 +1,166 @@
+# Build one upstream Hermes WebUI release as horo-next-webui and publish it.
+#
+#   upstream tag  ──overlay──▶  Python floors  ──▶  front-end libraries  ──▶  wheel
+#   ──▶  advisory audit  ──▶  verify on every supported Python  ──▶  TestPyPI
+#   ──▶  (approval)  ──▶  PyPI + GitHub release
+#
+# Upstream code is never committed to this repository. Each run clones the tag
+# fresh, so a release is a pure function of (upstream tag, overlay/) — and of
+# the advisory databases on the day it runs.
+#
+# Publishing uses PyPI Trusted Publishing: no API token is stored here.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "Upstream release tag, e.g. v0.52.113 or exp-v0.52.416"
+        required: true
+      version:
+        description: "Version to publish, e.g. 0.52.416 (or 0.52.416.post1)"
+        required: true
+      publish:
+        description: "Publish after verification (false = build and verify only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      pythons: ${{ steps.meta.outputs.pythons }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      # Mermaid is rebuilt with esbuild so its embedded DOMPurify is a fixed release.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Clone the upstream release
+        run: |
+          git clone --depth 1 --branch "${{ inputs.upstream_tag }}" \
+            https://github.com/nesquena/hermes-webui.git upstream
+          base="${{ inputs.version }}"; base="${base%%.post*}"
+          [ "${{ inputs.upstream_tag }}" = "v$base" ] || [ "${{ inputs.upstream_tag }}" = "exp-v$base" ] \
+            || { echo "version $base does not match tag ${{ inputs.upstream_tag }}"; exit 1; }
+
+      - name: Apply the packaging overlay
+        run: uv run --with packaging python overlay/horo_overlay.py upstream "${{ inputs.version }}"
+
+      - name: Raise vulnerable Python dependency floors
+        run: uv run --with packaging python overlay/security_bump.py upstream --notes release-notes.md
+
+      - name: Self-host front-end libraries at advisory-free versions
+        # npm 11: same as horo-next, for lockfile behaviour consistent across runs.
+        env:
+          HORO_NPM: npx -y npm@11.21.0
+        run: uv run --with packaging python overlay/vendor_assets.py upstream --notes release-notes.md
+
+      - name: Build the wheel
+        working-directory: upstream
+        run: uv build --wheel --out-dir ../dist
+
+      # The air-gapped target is Linux / CPython 3.12. What `pip install
+      # horo-next-webui` resolves today is the offline list; any advisory in it
+      # holds the release.
+      - name: Audit dependencies for Linux / Python 3.12
+        run: |
+          echo "" >> release-notes.md
+          echo "## Advisory audit — Linux / Python 3.12" >> release-notes.md
+          echo "dist/horo_next_webui-${{ inputs.version }}-py3-none-any.whl" > online.in
+          uv pip compile online.in --python-version 3.12 \
+            --python-platform x86_64-manylinux_2_28 --no-header -q -o resolved.txt
+          grep -v '^dist/' resolved.txt > "requirements-${{ inputs.version }}.txt"
+          uv run --with packaging python overlay/audit.py "requirements-${{ inputs.version }}.txt" \
+            "Dependencies, pip install" --fail --notes release-notes.md
+
+      - id: meta
+        run: echo "pythons=$(jq -c .pythons upstream/horo-build.json)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release
+          path: |
+            dist/
+            release-notes.md
+            requirements-${{ inputs.version }}.txt
+            airgap/probe.py
+          if-no-files-found: error
+
+  verify:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ${{ fromJson(needs.build.outputs.pythons) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+      - name: Install into a clean venv and check it works
+        run: |
+          uv run --with packaging python overlay/verify_wheel.py \
+            dist/horo_next_webui-${{ inputs.version }}-py3-none-any.whl \
+            "${{ matrix.python }}" "${{ inputs.version }}"
+
+  testpypi:
+    if: inputs.publish
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+      # skip-existing: a version can be uploaded to TestPyPI only once; a re-run
+      # after a rejected PyPI step must still be able to reach it.
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/
+          skip-existing: true
+
+  # The `pypi` environment should require a reviewer (repository settings).
+  # A version uploaded to PyPI can never be uploaded again, even if deleted.
+  pypi:
+    if: inputs.publish
+    needs: testpypi
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist/
+      - name: GitHub release with notes and the offline dependency list
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ inputs.version }}" \
+            --repo "${{ github.repository }}" \
+            --title "horo-next-webui ${{ inputs.version }} (upstream ${{ inputs.upstream_tag }})" \
+            --notes-file release-notes.md \
+            dist/*.whl \
+            "requirements-${{ inputs.version }}.txt" \
+            airgap/probe.py
