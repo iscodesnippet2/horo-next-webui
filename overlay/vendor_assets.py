@@ -12,8 +12,8 @@ Two problems for an air-gapped install:
 
 * Pinned versions collect advisories (js-yaml 4.1.0, Mermaid 10.9.3 and Prism
   1.29.0 had them at exp-v0.52.416). Each library is moved to the LOWEST
-  release, within the same major version, that has no OSV advisory: the
-  smallest change that is clean, and no API break.
+  semver-compatible release that has no OSV advisory: the smallest change
+  that is clean, and no API break (exceptions: ALLOW_BREAKING).
 
 npm package layout is kept for CDN libraries (`<pkg>/<version>/<path in
 package>`), so a URL maps one-to-one and Prism's autoloader finds its language
@@ -24,11 +24,11 @@ A prebuilt bundle can embed a vulnerable copy of a dependency that no release
 of the library fixes: every Mermaid release up to 12.1.0 embeds a DOMPurify
 with open advisories. Libraries in REBUILD are therefore rebuilt here from the
 npm package with esbuild, every package in their resolved tree checked against
-OSV, and any vulnerable one overridden to its lowest clean release in the same
-major. Needs Node and npm (HORO_NPM, default `npm`).
+OSV, and any vulnerable one overridden to its lowest clean semver-compatible
+release. Needs Node and npm (HORO_NPM, default `npm`).
 
-Fails closed: an unparseable reference, a library with no clean release in its
-major, a missing file in the new tarball, or a CDN URL left in the front end
+Fails closed: an unparseable reference, a library with no clean semver-compatible
+release, a missing file in the new tarball, or a CDN URL left in the front end
 stops the build.
 """
 from __future__ import annotations
@@ -90,8 +90,26 @@ def advisories(name: str, version: str) -> list[str]:
     return [v["id"] for v in res.get("vulns", []) if not v.get("withdrawn")]
 
 
+# Semver-compatible means same major, or same minor below 1.0. Crossing that
+# line can break callers, so it is allowed only for a library listed here, with
+# the version line it may move to — each entry checked against how upstream
+# uses the library and exercised in a browser before being added.
+#   katex 0.16 → 0.18: GHSA-238p-pmpm-9mq7 is fixed only in 0.18.2. Upstream
+#   calls katex.render(src, el, {displayMode, throwOnError, trust, strict}),
+#   unchanged; 0.18 prefixes internal CSS classes, but the .katex,
+#   .katex-display and .katex-html that style.css targets keep their names.
+ALLOW_BREAKING = {"katex": "0.18"}
+
+
+def compatible(name: str, cur: Version, pv: Version) -> bool:
+    if pv.major == cur.major and (cur.major > 0 or pv.minor == cur.minor):
+        return True
+    allowed = ALLOW_BREAKING.get(name)
+    return allowed is not None and f"{pv.major}.{pv.minor}" == allowed
+
+
 def clean_version(name: str, current: str) -> tuple[str | None, list[str]]:
-    """Lowest release >= current, same major, with no advisory."""
+    """Lowest semver-compatible release >= current with no advisory."""
     found = advisories(name, current)
     if not found:
         return current, []
@@ -102,7 +120,7 @@ def clean_version(name: str, current: str) -> tuple[str | None, list[str]]:
             pv = Version(v)
         except InvalidVersion:
             continue
-        if not pv.is_prerelease and pv > cur and pv.major == cur.major:
+        if not pv.is_prerelease and pv > cur and compatible(name, cur, pv):
             versions.append(pv)
     for pv in sorted(versions):
         if not advisories(name, str(pv)):
@@ -127,7 +145,7 @@ def rebuild(name: str, version: str, bundle: str, global_name: str, dest: Path) 
     """Bundle name@version with esbuild after clearing its tree of advisories.
 
     Returns the overrides applied, as notes. Raises RuntimeError when an
-    advisory has no clean release in its major.
+    advisory has no clean semver-compatible release.
     """
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
@@ -154,7 +172,7 @@ def rebuild(name: str, version: str, bundle: str, global_name: str, dest: Path) 
             for (dep, ver), ids in hits.items():
                 new, _ = clean_version(dep, ver)
                 if new is None:
-                    raise RuntimeError(f"bundled {dep}@{ver}: {ids} and no clean release in its major")
+                    raise RuntimeError(f"bundled {dep}@{ver}: {ids} and no clean semver-compatible release")
                 overrides[dep] = new
                 applied.append(f"{dep} {ver} → {new} (fixes {', '.join(ids)})")
         else:
@@ -220,7 +238,7 @@ for p in front_end_files():
 for (name, ver), paths in sorted(cdn.items()):
     new, ids = clean_version(name, ver)
     if new is None:
-        fail(f"{name}@{ver}: {len(ids)} advisories and no clean {Version(ver).major}.x release")
+        fail(f"{name}@{ver}: {len(ids)} advisories and no clean semver-compatible release")
         continue
     dest_root = VENDOR / name / new
     try:
@@ -253,7 +271,7 @@ for d in sorted(VENDOR.glob("*/*")):
     name, ver = d.parent.name, d.name
     new, ids = clean_version(name, ver)
     if new is None:
-        fail(f"{name}@{ver}: {len(ids)} advisories and no clean {Version(ver).major}.x release")
+        fail(f"{name}@{ver}: {len(ids)} advisories and no clean semver-compatible release")
         continue
     if new == ver:
         record(name, ver, ver, [], "vendored upstream")
