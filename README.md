@@ -29,6 +29,8 @@ committed here**. The default branch, `horo`, holds only the tooling:
 | `overlay/vendor_assets.py` | Self-hosts every front-end library at its lowest advisory-free release in the same major; rebuilds Mermaid so its embedded DOMPurify is fixed too |
 | `overlay/verify_wheel.py` | Installs the wheel into a clean venv, starts the server, fetches every vendored asset |
 | `overlay/audit.py` | Checks the resolved Linux / Python 3.12 dependency set against OSV |
+| `overlay/audit_shipped.py` | Checks every shipped component — Python and npm, bundled ones included — against OSV **and Sonatype** (the enterprise mirror's scanner); needs the `SONATYPE_TOKEN` secret |
+| `.github/workflows/rescan.yml` | Re-audits the latest release daily; opens an issue on a new advisory |
 | `airgap/probe.py` | Run on an air-gapped machine: which dependencies the mirror serves |
 | `pypi/README.md` | The project page shown on PyPI |
 | `.github/workflows/release.yml` | Tag → overlay → floors → front end → wheel → audit → verify → TestPyPI → PyPI |
@@ -55,8 +57,15 @@ already picks the newest the index has), but the resolved set is audited.
 uploads cleanly and cannot start. Every release is installed into a clean venv
 on each supported Python and its server is started and fetched.
 
-**A clean audit is a snapshot.** OSV is checked on the day of the build.
-Advisories published later, or held only in other databases, are not covered.
+**Zero known advisories, in OSV and Sonatype.** The enterprise mirror is
+guarded by Sonatype, so every shipped component is checked against both, and
+any finding — or a Sonatype check that could not run — holds the release.
+Sonatype's public API (Sonatype Guide) serves a subset of its commercial data;
+a clean result narrows the gap with the mirror, it cannot close it.
+
+**A clean audit is a snapshot.** It holds on the day of the build. The daily
+rescan checks the latest release again and opens an issue on a new advisory;
+the fix is the same upstream tag rebuilt as `X.Y.Z.postN`.
 
 ## What it does not cover
 
@@ -76,7 +85,8 @@ One-time setup (repository settings and PyPI):
 
 1. Set `horo` as the default branch.
 2. Create environments `testpypi` and `pypi`; give `pypi` a required reviewer.
-3. On PyPI and TestPyPI, add a pending Trusted Publisher: project
+3. Add a Sonatype Guide personal access token as the `SONATYPE_TOKEN` secret.
+4. On PyPI and TestPyPI, add a pending Trusted Publisher: project
    `horo-next-webui`, owner `iscodesnippet2`, repository `horo-next-webui`,
    workflow `release.yml`, environment `pypi` / `testpypi` respectively.
 

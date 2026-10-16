@@ -85,6 +85,20 @@ jobs:
           uv run --with packaging python overlay/audit.py "requirements-${{ inputs.version }}.txt" \
             "Dependencies, pip install" --fail --notes release-notes.md
 
+      # The enterprise mirror is guarded by Sonatype. Every shipped component —
+      # Python and npm, bundled ones included — must be clean in OSV and in
+      # Sonatype's public data. The same check reruns daily (rescan.yml).
+      - name: Audit every shipped component against OSV and Sonatype
+        env:
+          SONATYPE_TOKEN: ${{ secrets.SONATYPE_TOKEN }}
+        run: |
+          cp upstream/horo-vendor.json "horo-vendor-${{ inputs.version }}.json"
+          echo "" >> release-notes.md
+          echo "## Shipped-component audit — OSV and Sonatype" >> release-notes.md
+          uv run --with packaging python overlay/audit_shipped.py \
+            "requirements-${{ inputs.version }}.txt" "horo-vendor-${{ inputs.version }}.json" \
+            --notes release-notes.md
+
       - id: meta
         run: echo "pythons=$(jq -c .pythons upstream/horo-build.json)" >> "$GITHUB_OUTPUT"
 
@@ -95,6 +109,7 @@ jobs:
             dist/
             release-notes.md
             requirements-${{ inputs.version }}.txt
+            horo-vendor-${{ inputs.version }}.json
             airgap/probe.py
           if-no-files-found: error
 
@@ -163,4 +178,5 @@ jobs:
             --notes-file release-notes.md \
             dist/*.whl \
             "requirements-${{ inputs.version }}.txt" \
+            "horo-vendor-${{ inputs.version }}.json" \
             airgap/probe.py

@@ -70,6 +70,9 @@ NPM = shlex.split(os.environ.get("HORO_NPM", "npm"))
 
 failures: list[str] = []
 notes: list[str] = []
+# Every npm component the wheel ships, for audit_shipped.py and the daily
+# rescan: (name, version) → how it ships.
+shipped: dict[tuple[str, str], str] = {}
 
 
 def fail(msg: str) -> None:
@@ -184,6 +187,9 @@ def rebuild(name: str, version: str, bundle: str, global_name: str, dest: Path) 
         if r.returncode:
             raise RuntimeError(f"esbuild failed: {r.stderr[-400:]}")
         print(f"[vendor] ok   {name}@{version}: rebuilt, {len(tree)} bundled packages, no advisory")
+        for dep, ver in tree:
+            if dep != name:
+                shipped.setdefault((dep, ver), f"bundled in {name}@{version}")
         return applied
 
 
@@ -223,6 +229,7 @@ def rewrite(old: str, new: str) -> int:
 
 
 def record(name: str, old: str, new: str, ids: list[str], how: str) -> None:
+    shipped[(name, new)] = "static/vendor"
     fixed = f"{old} → {new}, fixes {', '.join(ids)}" if ids else f"{old}, no advisory"
     notes.append(f"- {name}: {fixed} ({how})")
     print(f"[vendor] ok   {name}: {fixed} ({how})")
@@ -332,6 +339,10 @@ for p in front_end_files():
     for m in VENDORED.finditer(p.read_text(encoding="utf-8")):
         if not (VENDOR / m["name"] / m["ver"]).is_dir():
             fail(f"{p.relative_to(ROOT)} references absent static/vendor/{m['name']}/{m['ver']}/")
+
+(ROOT / "horo-vendor.json").write_text(json.dumps(
+    [{"name": n, "version": v, "ships": how} for (n, v), how in sorted(shipped.items())],
+    indent=1) + "\n", encoding="utf-8")
 
 if NOTES:
     with NOTES.open("a", encoding="utf-8") as f:
