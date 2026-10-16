@@ -1,0 +1,24 @@
+# Ask Sonatype about specific packages — e.g. every version of one — to pick
+# a replacement when the release audit holds on a Sonatype-only finding.
+name: sonatype-lookup
+
+on:
+  workflow_dispatch:
+    inputs:
+      purls:
+        description: "Space-separated purls; omit the version for all releases (pkg:npm/mermaid)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  lookup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - env:
+          SONATYPE_GUIDE_TOKEN: ${{ secrets.SONATYPE_GUIDE_TOKEN }}
+          PURLS: ${{ inputs.purls }}
+        run: uv run --with packaging python overlay/sonatype_lookup.py $PURLS
