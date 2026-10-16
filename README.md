@@ -28,6 +28,8 @@ committed here**. The default branch, `horo`, holds only the tooling:
 | `overlay/security_bump.py` | Raises Python dependency floors that admit a vulnerable version |
 | `overlay/vendor_assets.py` | Self-hosts every front-end library at its lowest advisory-free release in the same major; rebuilds Mermaid so its embedded DOMPurify is fixed too |
 | `overlay/verify_wheel.py` | Installs the wheel into a clean venv, starts the server, fetches every vendored asset |
+| `overlay/browser_smoke.py` | Runs upstream's Mermaid, KaTeX, PDF.js, Prism and xterm render paths in Chromium from the installed wheel, offline |
+| `overlay/sonatype_lookup.py` | Lists Sonatype's findings for every version of a package (via the `sonatype-lookup` workflow), to pick a replacement |
 | `overlay/audit.py` | Checks the resolved Linux / Python 3.12 dependency set against OSV |
 | `overlay/audit_shipped.py` | Checks every shipped component — Python and npm, bundled ones included — against OSV **and Sonatype** (the enterprise mirror's scanner); needs the `SONATYPE_GUIDE_TOKEN` secret |
 | `.github/workflows/rescan.yml` | Re-audits the latest release daily; opens an issue on a new advisory |

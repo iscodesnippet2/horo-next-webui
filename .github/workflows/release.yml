@@ -65,6 +65,8 @@ jobs:
         # npm 11: same as horo-next, for lockfile behaviour consistent across runs.
         env:
           HORO_NPM: npx -y npm@11.21.0
+          # Versions are chosen clean in OSV and in Sonatype.
+          SONATYPE_GUIDE_TOKEN: ${{ secrets.SONATYPE_GUIDE_TOKEN }}
         run: uv run --with packaging python overlay/vendor_assets.py upstream --notes release-notes.md
 
       - name: Build the wheel
@@ -131,6 +133,14 @@ jobs:
           uv run --with packaging python overlay/verify_wheel.py \
             dist/horo_next_webui-${{ inputs.version }}-py3-none-any.whl \
             "${{ matrix.python }}" "${{ inputs.version }}"
+
+      # Serving every file is not the same as working: run upstream's own
+      # Mermaid, KaTeX, PDF.js, Prism and xterm paths in Chromium, offline.
+      - name: Render the front end in a browser
+        run: |
+          uvx --from playwright==1.64.0 playwright install --with-deps chromium
+          uv run --with playwright==1.64.0 python overlay/browser_smoke.py \
+            dist/horo_next_webui-${{ inputs.version }}-py3-none-any.whl "${{ matrix.python }}"
 
   testpypi:
     if: inputs.publish

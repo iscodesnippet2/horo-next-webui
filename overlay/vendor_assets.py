@@ -45,6 +45,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -87,10 +88,46 @@ def get_json(url: str, payload: dict | None = None) -> dict:
         return json.load(r)
 
 
+# The enterprise mirror enforces Sonatype, whose data differs from OSV — at
+# exp-v0.52.416 it held Mermaid 10.9.8 and PDF.js 4.9.155 vulnerable where OSV
+# did not. Versions are chosen clean in BOTH. Without SONATYPE_GUIDE_TOKEN the
+# choice is OSV-only, and audit_shipped.py holds the release.
+SONATYPE = "https://api.guide.sonatype.com/api/v3/component-report"
+SONATYPE_TOKEN = os.environ.get("SONATYPE_GUIDE_TOKEN", "").strip()
+_sonatype: dict[tuple[str, str], list[str]] = {}
+if not SONATYPE_TOKEN:
+    print("[vendor] WARN SONATYPE_GUIDE_TOKEN not set — choosing versions by OSV only")
+
+
+def npm_purl(name: str, version: str) -> str:
+    return f"pkg:npm/{name.replace('@', '%40', 1) if name.startswith('@') else name}@{version}"
+
+
+def sonatype(pkgs: list[tuple[str, str]]) -> dict[tuple[str, str], list[str]]:
+    """Sonatype findings per (name, version); cached, batched 128 per request."""
+    todo = [p for p in dict.fromkeys(pkgs) if p not in _sonatype]
+    if SONATYPE_TOKEN:
+        auth = "Basic " + base64.b64encode(f"horo:{SONATYPE_TOKEN}".encode()).decode()
+        for i in range(0, len(todo), 128):
+            chunk = todo[i:i + 128]
+            by_purl = {urllib.parse.unquote(npm_purl(*p)).lower(): p for p in chunk}
+            req = urllib.request.Request(SONATYPE, data=json.dumps(
+                {"coordinates": [npm_purl(*p) for p in chunk]}).encode(),
+                headers={"Content-Type": "application/json", "Authorization": auth})
+            with urllib.request.urlopen(req, timeout=120) as r:
+                for entry in json.load(r):
+                    key = by_purl.get(urllib.parse.unquote(entry.get("coordinates", "")).lower())
+                    if key:
+                        _sonatype[key] = [f"sonatype:{v.get('cve') or v.get('id')}"
+                                          for v in entry.get("vulnerabilities", [])]
+    return {p: _sonatype.get(p, []) for p in pkgs}
+
+
 def advisories(name: str, version: str) -> list[str]:
     res = get_json("https://api.osv.dev/v1/query",
                    {"package": {"name": name, "ecosystem": "npm"}, "version": version})
-    return [v["id"] for v in res.get("vulns", []) if not v.get("withdrawn")]
+    ids = [v["id"] for v in res.get("vulns", []) if not v.get("withdrawn")]
+    return ids + sonatype([(name, version)])[(name, version)]
 
 
 # Semver-compatible means same major, or same minor below 1.0. Crossing that
@@ -101,14 +138,25 @@ def advisories(name: str, version: str) -> list[str]:
 #   calls katex.render(src, el, {displayMode, throwOnError, trust, strict}),
 #   unchanged; 0.18 prefixes internal CSS classes, but the .katex,
 #   .katex-display and .katex-html that style.css targets keep their names.
-ALLOW_BREAKING = {"katex": "0.18"}
+#   mermaid 10 → 11: Sonatype holds every 10.x release vulnerable
+#   (CVE-2025-54881 and others); its lowest clean release is 11.16.1. Upstream
+#   calls mermaid.initialize({startOnLoad, theme, themeVariables, ...}) and
+#   `await mermaid.render(id, code)`, both unchanged in 11.
+#   pdfjs-dist 4 → 6: Sonatype holds every release before 6.2.108 vulnerable to
+#   CVE-2026-16633 (CVSS 8.6). Upstream uses getDocument({data,
+#   isEvalSupported}), getPage, getViewport, page.render({canvasContext,
+#   viewport}) and GlobalWorkerOptions.workerSrc — all still accepted in 6 —
+#   and build/pdf.min.mjs + build/pdf.worker.min.mjs keep their paths.
+# The value is the release line a library may move to: a major, or 0.minor.
+ALLOW_BREAKING = {"katex": "0.18", "mermaid": "11", "pdfjs-dist": "6"}
+
+
+def line(v: Version) -> str:
+    return f"0.{v.minor}" if v.major == 0 else str(v.major)
 
 
 def compatible(name: str, cur: Version, pv: Version) -> bool:
-    if pv.major == cur.major and (cur.major > 0 or pv.minor == cur.minor):
-        return True
-    allowed = ALLOW_BREAKING.get(name)
-    return allowed is not None and f"{pv.major}.{pv.minor}" == allowed
+    return line(pv) == line(cur) or ALLOW_BREAKING.get(name) == line(pv)
 
 
 def clean_version(name: str, current: str) -> tuple[str | None, list[str]]:
@@ -125,13 +173,14 @@ def clean_version(name: str, current: str) -> tuple[str | None, list[str]]:
             continue
         if not pv.is_prerelease and pv > cur and compatible(name, cur, pv):
             versions.append(pv)
+    sonatype([(name, str(pv)) for pv in versions])  # one batched request
     for pv in sorted(versions):
         if not advisories(name, str(pv)):
             return str(pv), found
     return None, found
 
 
-def osv_batch(pkgs: list[tuple[str, str]]) -> dict[tuple[str, str], list[str]]:
+def advisory_batch(pkgs: list[tuple[str, str]]) -> dict[tuple[str, str], list[str]]:
     hits = {}
     for i in range(0, len(pkgs), 500):
         chunk = pkgs[i:i + 500]
@@ -141,6 +190,9 @@ def osv_batch(pkgs: list[tuple[str, str]]) -> dict[tuple[str, str], list[str]]:
             ids = [x["id"] for x in r.get("vulns", []) if not x.get("withdrawn")]
             if ids:
                 hits[key] = ids
+    for key, ids in sonatype(pkgs).items():
+        if ids:
+            hits.setdefault(key, []).extend(ids)
     return hits
 
 
@@ -169,7 +221,7 @@ def rebuild(name: str, version: str, bundle: str, global_name: str, dest: Path) 
                            for path, meta in lock["packages"].items()
                            if path and "version" in meta and not meta.get("dev")
                            and "esbuild" not in path})
-            hits = osv_batch(tree)
+            hits = advisory_batch(tree)
             if not hits:
                 break
             for (dep, ver), ids in hits.items():
@@ -313,22 +365,51 @@ for fname, (name, src, pattern) in SINGLE.items():
     else:
         record(name, m[1], m[1], [], "vendored upstream")
 
-# ── 3. Subresource integrity for the rewritten tags ──────────────────────
-index = STATIC / "index.html"
-html = index.read_text(encoding="utf-8")
+# ── 3. Module specifiers must be URLs ─────────────────────────────────────
+# PDF.js is imported from a blob: module, where 'static/vendor/…' is a bare
+# specifier and fails to resolve (upstream's CDN URL was absolute), and its
+# worker URL would resolve against the blob. Both are made absolute against
+# the page.
+ui = STATIC / "ui.js"
+text, n = re.subn(r"const (_pdf(?:Src|Worker))='(static/vendor/[^']+)'",
+                  r"const \1=new URL('\2',document.baseURI).href", ui.read_text(encoding="utf-8"))
+if n != 2:
+    fail(f"ui.js: expected 2 PDF.js URLs to make absolute, found {n}")
+ui.write_text(text, encoding="utf-8")
+
+# ── 4. Subresource integrity for the rewritten references ─────────────────
+# An integrity hash follows its URL: as an attribute in index.html, and as
+# `script.integrity='…'` after `script.src='…'` in ui.js's lazy loaders. A
+# hash left over from the old file makes the browser refuse the new one.
+SRI = re.compile(r"(?P<url>static/vendor/[\w@./-]+)(?P<mid>['\"][^<>]{0,200}?integrity\s*=\s*['\"])"
+                 r"(?P<sri>sha384-[A-Za-z0-9+/=]+)")
+sri_count = 0
 
 
 def resri(m: re.Match) -> str:
+    global sri_count
     f = STATIC.parent / m["url"]
     if not f.is_file():
-        fail(f"index.html references missing {m['url']}")
+        fail(f"integrity given for missing {m['url']}")
         return m[0]
+    sri_count += 1
     digest = base64.b64encode(hashlib.sha384(f.read_bytes()).digest()).decode()
-    return m[0].replace(m["sri"], f"sha384-{digest}")
+    return f"{m['url']}{m['mid']}sha384-{digest}"
 
 
-html = re.sub(r'(?:src|href)="(?P<url>static/vendor/[^"]+)"[^>]*?integrity="(?P<sri>sha384-[^"]+)"', resri, html)
-index.write_text(html, encoding="utf-8")
+for p in front_end_files():
+    text = p.read_text(encoding="utf-8")
+    new = SRI.sub(resri, text)
+    if new != text:
+        p.write_text(new, encoding="utf-8")
+# Every integrity hash in the front end must now belong to a vendored file.
+for p in front_end_files():
+    text = p.read_text(encoding="utf-8")
+    covered = {m.start("sri") for m in SRI.finditer(text)}
+    for m in re.finditer(r"sha384-[A-Za-z0-9+/=]{20,}", text):
+        if m.start() not in covered and "integrity" in text[max(0, m.start() - 40):m.start()]:
+            fail(f"{p.relative_to(ROOT)}: integrity hash not tied to a vendored URL near {text[max(0, m.start() - 80):m.start()]!r}")
+print(f"[vendor] ok   {sri_count} integrity hashes recomputed")
 
 # ── Postconditions ───────────────────────────────────────────────────────
 for p in front_end_files():
