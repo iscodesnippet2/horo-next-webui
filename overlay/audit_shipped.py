@@ -13,7 +13,7 @@ CVE or OSV entry carries. A release is held unless BOTH report nothing for:
   library rebuilt from source.
 
 Sonatype is queried through its public API (Sonatype Guide, formerly OSS
-Index) with a personal access token in SONATYPE_TOKEN. Without a token the
+Index) with a personal access token in SONATYPE_GUIDE_TOKEN. Without a token the
 audit fails: an unchecked release is not a clean one. The public API serves a
 subset of what Sonatype's commercial products know, so a clean result narrows
 the gap with the mirror; it cannot close it.
@@ -38,15 +38,7 @@ from packaging.utils import canonicalize_name
 TARGET = {"python_version": "3.12", "python_full_version": "3.12.0", "sys_platform": "linux",
           "platform_system": "Linux", "platform_machine": "x86_64", "os_name": "posix",
           "implementation_name": "cpython", "platform_python_implementation": "CPython", "extra": ""}
-# Sonatype's docs give Basic auth with the token as password; some Guide
-# tokens are only accepted as Bearer, and the legacy OSS Index host still
-# answers during the migration. Tried in order on one probe request; the first
-# that authenticates is used for the whole audit.
-SONATYPE_ROUTES = [
-    ("guide/basic", "https://api.guide.sonatype.com/api/v3/component-report", "basic"),
-    ("guide/bearer", "https://api.guide.sonatype.com/api/v3/component-report", "bearer"),
-    ("ossindex/basic", "https://ossindex.sonatype.org/api/v3/component-report", "basic"),
-]
+SONATYPE = "https://api.guide.sonatype.com/api/v3/component-report"
 BATCH = 128
 
 reqs, manifest = Path(sys.argv[1]), Path(sys.argv[2])
@@ -91,32 +83,18 @@ for i in range(0, len(components), 500):
                 findings.setdefault(purl(e, n, v), []).append(f"OSV {x['id']}")
 
 # ── Sonatype ─────────────────────────────────────────────────────────────
-token = os.environ.get("SONATYPE_TOKEN", "").strip()
+token = os.environ.get("SONATYPE_GUIDE_TOKEN", "").strip()
 sonatype_ok = bool(token)
 if not token:
-    print("[audit] FAIL SONATYPE_TOKEN is not set — Sonatype not checked")
+    print("[audit] FAIL SONATYPE_GUIDE_TOKEN is not set — Sonatype not checked")
 else:
+    # Basic auth with the token as password; the user name is ignored for a PAT.
+    auth = {"Authorization": "Basic " + base64.b64encode(f"horo:{token}".encode()).decode()}
     purls = [purl(*c) for c in components]
     seen = set()
-    route = None
-    for label, url, scheme in SONATYPE_ROUTES:
-        # The username is ignored for a personal access token.
-        auth = {"Authorization": f"Bearer {token}" if scheme == "bearer"
-                else "Basic " + base64.b64encode(f"horo:{token}".encode()).decode()}
-        try:
-            post(url, {"coordinates": purls[:1]}, auth)
-        except urllib.error.HTTPError as exc:
-            print(f"[audit] Sonatype {label}: HTTP {exc.code}")
-            continue
-        route = (label, url, auth)
-        print(f"[audit] Sonatype {label}: authenticated")
-        break
     try:
-        if route is None:
-            raise urllib.error.HTTPError(SONATYPE_ROUTES[0][1], 401, "no route authenticated", {}, None)
-        _, url, auth = route
         for i in range(0, len(purls), BATCH):
-            for entry in post(url, {"coordinates": purls[i:i + BATCH]}, auth):
+            for entry in post(SONATYPE, {"coordinates": purls[i:i + BATCH]}, auth):
                 coord = entry.get("coordinates", "")
                 seen.add(coord)
                 for x in entry.get("vulnerabilities", []):

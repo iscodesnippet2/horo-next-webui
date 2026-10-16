@@ -90,7 +90,7 @@ jobs:
       # Sonatype's public data. The same check reruns daily (rescan.yml).
       - name: Audit every shipped component against OSV and Sonatype
         env:
-          SONATYPE_TOKEN: ${{ secrets.SONATYPE_TOKEN }}
+          SONATYPE_GUIDE_TOKEN: ${{ secrets.SONATYPE_GUIDE_TOKEN }}
         run: |
           cp upstream/horo-vendor.json "horo-vendor-${{ inputs.version }}.json"
           echo "" >> release-notes.md

@@ -36,7 +36,7 @@ jobs:
         id: audit
         if: steps.rel.outputs.tag != ''
         env:
-          SONATYPE_TOKEN: ${{ secrets.SONATYPE_TOKEN }}
+          SONATYPE_GUIDE_TOKEN: ${{ secrets.SONATYPE_GUIDE_TOKEN }}
         run: |
           uv run --with packaging python overlay/audit_shipped.py \
             rel/requirements-*.txt rel/horo-vendor-*.json --report report.md

@@ -29,7 +29,7 @@ committed here**. The default branch, `horo`, holds only the tooling:
 | `overlay/vendor_assets.py` | Self-hosts every front-end library at its lowest advisory-free release in the same major; rebuilds Mermaid so its embedded DOMPurify is fixed too |
 | `overlay/verify_wheel.py` | Installs the wheel into a clean venv, starts the server, fetches every vendored asset |
 | `overlay/audit.py` | Checks the resolved Linux / Python 3.12 dependency set against OSV |
-| `overlay/audit_shipped.py` | Checks every shipped component — Python and npm, bundled ones included — against OSV **and Sonatype** (the enterprise mirror's scanner); needs the `SONATYPE_TOKEN` secret |
+| `overlay/audit_shipped.py` | Checks every shipped component — Python and npm, bundled ones included — against OSV **and Sonatype** (the enterprise mirror's scanner); needs the `SONATYPE_GUIDE_TOKEN` secret |
 | `.github/workflows/rescan.yml` | Re-audits the latest release daily; opens an issue on a new advisory |
 | `airgap/probe.py` | Run on an air-gapped machine: which dependencies the mirror serves |
 | `pypi/README.md` | The project page shown on PyPI |
@@ -85,7 +85,7 @@ One-time setup (repository settings and PyPI):
 
 1. Set `horo` as the default branch.
 2. Create environments `testpypi` and `pypi`; give `pypi` a required reviewer.
-3. Add a Sonatype Guide personal access token as the `SONATYPE_TOKEN` secret.
+3. Add a Sonatype Guide personal access token as the `SONATYPE_GUIDE_TOKEN` secret.
 4. On PyPI and TestPyPI, add a pending Trusted Publisher: project
    `horo-next-webui`, owner `iscodesnippet2`, repository `horo-next-webui`,
    workflow `release.yml`, environment `pypi` / `testpypi` respectively.
