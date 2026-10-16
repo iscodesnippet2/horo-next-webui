@@ -38,7 +38,15 @@ from packaging.utils import canonicalize_name
 TARGET = {"python_version": "3.12", "python_full_version": "3.12.0", "sys_platform": "linux",
           "platform_system": "Linux", "platform_machine": "x86_64", "os_name": "posix",
           "implementation_name": "cpython", "platform_python_implementation": "CPython", "extra": ""}
-SONATYPE = "https://api.guide.sonatype.com/api/v3/component-report"
+# Sonatype's docs give Basic auth with the token as password; some Guide
+# tokens are only accepted as Bearer, and the legacy OSS Index host still
+# answers during the migration. Tried in order on one probe request; the first
+# that authenticates is used for the whole audit.
+SONATYPE_ROUTES = [
+    ("guide/basic", "https://api.guide.sonatype.com/api/v3/component-report", "basic"),
+    ("guide/bearer", "https://api.guide.sonatype.com/api/v3/component-report", "bearer"),
+    ("ossindex/basic", "https://ossindex.sonatype.org/api/v3/component-report", "basic"),
+]
 BATCH = 128
 
 reqs, manifest = Path(sys.argv[1]), Path(sys.argv[2])
@@ -88,13 +96,27 @@ sonatype_ok = bool(token)
 if not token:
     print("[audit] FAIL SONATYPE_TOKEN is not set — Sonatype not checked")
 else:
-    # Basic auth; the username is ignored for a personal access token.
-    auth = {"Authorization": "Basic " + base64.b64encode(f"horo:{token}".encode()).decode()}
     purls = [purl(*c) for c in components]
     seen = set()
+    route = None
+    for label, url, scheme in SONATYPE_ROUTES:
+        # The username is ignored for a personal access token.
+        auth = {"Authorization": f"Bearer {token}" if scheme == "bearer"
+                else "Basic " + base64.b64encode(f"horo:{token}".encode()).decode()}
+        try:
+            post(url, {"coordinates": purls[:1]}, auth)
+        except urllib.error.HTTPError as exc:
+            print(f"[audit] Sonatype {label}: HTTP {exc.code}")
+            continue
+        route = (label, url, auth)
+        print(f"[audit] Sonatype {label}: authenticated")
+        break
     try:
+        if route is None:
+            raise urllib.error.HTTPError(SONATYPE_ROUTES[0][1], 401, "no route authenticated", {}, None)
+        _, url, auth = route
         for i in range(0, len(purls), BATCH):
-            for entry in post(SONATYPE, {"coordinates": purls[i:i + BATCH]}, auth):
+            for entry in post(url, {"coordinates": purls[i:i + BATCH]}, auth):
                 coord = entry.get("coordinates", "")
                 seen.add(coord)
                 for x in entry.get("vulnerabilities", []):
@@ -104,7 +126,8 @@ else:
                         f"Sonatype {ident} (CVSS {score}) {x.get('title', '')}".rstrip())
     except urllib.error.HTTPError as exc:
         sonatype_ok = False
-        print(f"[audit] FAIL Sonatype API: HTTP {exc.code} {exc.read()[:300]!r}")
+        body = exc.read()[:300] if exc.fp else b""
+        print(f"[audit] FAIL Sonatype API: HTTP {exc.code} {body!r}")
     else:
         # Coordinates come back normalized; compare loosely, but every
         # component must have been answered for.
