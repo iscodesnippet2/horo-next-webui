@@ -1,133 +1,131 @@
 """Audit everything a release ships against OSV and Sonatype.
 
-    python overlay/audit_shipped.py <requirements.txt> <horo-vendor.json> [--notes FILE] [--report FILE]
+    python overlay/audit_shipped.py <sbom.cdx.json> [--notes FILE] [--report FILE] [--json FILE]
+
+The SBOM (sbom.py) is the list of what ships: every Python package the wheel
+resolves to on Linux / CPython 3.12, every vendored front-end library, and every
+package esbuild put in a rebuilt bundle.
 
 The enterprise mirror is guarded by Sonatype, whose data overlaps OSV but is
 not the same: Sonatype publishes its own findings (sonatype-YYYY-NNNN) that no
-CVE or OSV entry carries. A release is held unless BOTH report nothing for:
-
-* every Python package the wheel resolves to on Linux / CPython 3.12
-  (requirements-<version>.txt, pinned), and
-* every npm component in the wheel's front end (horo-vendor.json, written by
-  vendor_assets.py): each vendored library, and each package bundled into a
-  library rebuilt from source.
+CVE or OSV entry carries. A release is held unless BOTH report nothing.
 
 Sonatype is queried through its public API (Sonatype Guide, formerly OSS
-Index) with a personal access token in SONATYPE_GUIDE_TOKEN. Without a token the
-audit fails: an unchecked release is not a clean one. The public API serves a
-subset of what Sonatype's commercial products know, so a clean result narrows
-the gap with the mirror; it cannot close it.
+Index) with a personal access token in SONATYPE_GUIDE_TOKEN. No token, a
+rejected token, or a component left unanswered fails the audit: an unchecked
+release is not a clean one. The public API serves a subset of what Sonatype's
+commercial products know, so a clean result narrows the gap with the mirror; it
+cannot close it.
 
 Run daily against the latest release by .github/workflows/rescan.yml.
 """
 from __future__ import annotations
 
-import base64
+import argparse
+import datetime as dt
 import json
 import os
-import re
 import sys
-import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from packaging.markers import Marker
-from packaging.utils import canonicalize_name
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sonatype  # noqa: E402
 
-TARGET = {"python_version": "3.12", "python_full_version": "3.12.0", "sys_platform": "linux",
-          "platform_system": "Linux", "platform_machine": "x86_64", "os_name": "posix",
-          "implementation_name": "cpython", "platform_python_implementation": "CPython", "extra": ""}
-SONATYPE = "https://api.guide.sonatype.com/api/v3/component-report"
-BATCH = 128
-
-reqs, manifest = Path(sys.argv[1]), Path(sys.argv[2])
-notes = Path(sys.argv[sys.argv.index("--notes") + 1]) if "--notes" in sys.argv else None
-report = Path(sys.argv[sys.argv.index("--report") + 1]) if "--report" in sys.argv else None
-
-components: list[tuple[str, str, str]] = []  # (ecosystem, name, version)
-for raw in reqs.read_text(encoding="utf-8").splitlines():
-    m = re.match(r"^\s*([A-Za-z0-9_.\-]+)(\[[^\]]*\])?\s*==\s*([^\s;]+)\s*(?:;\s*(.+))?$", raw)
-    if m and not (m[4] and not Marker(m[4]).evaluate(TARGET)):
-        components.append(("PyPI", canonicalize_name(m[1]), m[3]))
-for c in json.loads(manifest.read_text(encoding="utf-8")):
-    components.append(("npm", c["name"], c["version"]))
-components = sorted(set(components))
-if not components:
-    sys.exit("[audit] nothing to audit — refusing to report a clean result")
+OSV = os.environ.get("HORO_OSV_URL", "https://api.osv.dev")
+TARGET = {"os": "Linux", "python": "3.12", "implementation": "CPython"}
 
 
-def purl(eco: str, name: str, version: str) -> str:
-    if eco == "PyPI":
-        return f"pkg:pypi/{name}@{version}"
-    return f"pkg:npm/{urllib.parse.quote(name, safe='/')}@{version}"
+def osv_package(purl: str) -> dict:
+    kind, _, rest = purl[len("pkg:"):].partition("/")
+    name, _, version = rest.rpartition("@")
+    return {"package": {"name": urllib.parse.unquote(name), "ecosystem": {"pypi": "PyPI", "npm": "npm"}[kind]},
+            "version": version}
 
 
-def post(url: str, payload: dict, headers: dict | None = None):
+def post(url: str, payload: dict) -> dict:
     req = urllib.request.Request(url, data=json.dumps(payload).encode(),
-                                 headers={"Content-Type": "application/json", **(headers or {})})
+                                 headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=120) as r:
         return json.load(r)
 
 
-findings: dict[str, list[str]] = {}  # purl → ["source id (cve, score) title"]
-
-# ── OSV ──────────────────────────────────────────────────────────────────
-for i in range(0, len(components), 500):
-    chunk = components[i:i + 500]
-    res = post("https://api.osv.dev/v1/querybatch", {"queries": [
-        {"package": {"name": n, "ecosystem": e}, "version": v} for e, n, v in chunk]})
-    for (e, n, v), r in zip(chunk, res["results"]):
-        for x in r.get("vulns", []):
-            if not x.get("withdrawn"):
-                findings.setdefault(purl(e, n, v), []).append(f"OSV {x['id']}")
-
-# ── Sonatype ─────────────────────────────────────────────────────────────
-token = os.environ.get("SONATYPE_GUIDE_TOKEN", "").strip()
-sonatype_ok = bool(token)
-if not token:
-    print("[audit] FAIL SONATYPE_GUIDE_TOKEN is not set — Sonatype not checked")
-else:
-    # Basic auth with the token as password; the user name is ignored for a PAT.
-    auth = {"Authorization": "Basic " + base64.b64encode(f"horo:{token}".encode()).decode()}
-    purls = [purl(*c) for c in components]
-    seen = set()
+def check_osv(purls: list[str]) -> tuple[str, list[dict]]:
+    """(error or "", findings). Anything but one answer per package is an error."""
+    findings = []
     try:
-        for i in range(0, len(purls), BATCH):
-            for entry in post(SONATYPE, {"coordinates": purls[i:i + BATCH]}, auth):
-                coord = entry.get("coordinates", "")
-                seen.add(coord)
-                for x in entry.get("vulnerabilities", []):
-                    ident = x.get("cve") or x.get("displayName") or x.get("id")
-                    score = x.get("cvssScore")
-                    findings.setdefault(coord, []).append(
-                        f"Sonatype {ident} (CVSS {score}) {x.get('title', '')}".rstrip())
-    except urllib.error.HTTPError as exc:
-        sonatype_ok = False
-        body = exc.read()[:300] if exc.fp else b""
-        print(f"[audit] FAIL Sonatype API: HTTP {exc.code} {body!r}")
-    else:
-        # Coordinates come back normalized; compare loosely, but every
-        # component must have been answered for.
-        def norm(p: str) -> str:
-            return urllib.parse.unquote(p).lower()
-        missing = {norm(p) for p in purls} - {norm(c) for c in seen}
-        if missing:
-            sonatype_ok = False
-            print(f"[audit] FAIL Sonatype did not report on {len(missing)} components: {sorted(missing)[:5]}")
+        for i in range(0, len(purls), 500):
+            chunk = purls[i:i + 500]
+            res = post(f"{OSV}/v1/querybatch", {"queries": [osv_package(p) for p in chunk]})
+            if len(res.get("results", [])) != len(chunk):
+                return f"OSV answered for {len(res.get('results', []))} of {len(chunk)} packages", findings
+            for purl, r in zip(chunk, res["results"]):
+                findings += [{"purl": purl, "id": x["id"]} for x in r.get("vulns", []) if not x.get("withdrawn")]
+    except OSError as exc:
+        return f"OSV request failed: {exc}", findings
+    return "", findings
 
-n_py = sum(1 for c in components if c[0] == "PyPI")
-lines = [f"Shipped components: {n_py} Python (Linux / 3.12), {len(components) - n_py} npm — "
-         f"OSV and {'Sonatype' if sonatype_ok else 'Sonatype NOT CHECKED'}: "
-         f"{len(findings)} with findings"]
-for coord, items in sorted(findings.items()):
-    lines.append(f"  - {coord}: " + "; ".join(sorted(set(items))))
-print("\n".join(lines))
-for path in (notes, report):
-    if path:
-        with path.open("a", encoding="utf-8") as f:
-            f.write("\n" + "\n".join(lines) + "\n")
 
-if findings or not sonatype_ok:
-    sys.exit("[audit] release held: findings, or Sonatype not checked")
-print("[audit] clean")
+def check_sonatype(purls: list[str]) -> tuple[str, list[dict]]:
+    if not sonatype.available():
+        return "SONATYPE_GUIDE_TOKEN is not set — Sonatype not checked", []
+    try:
+        results = sonatype.report(purls)
+    except SystemExit as exc:  # a rejected token, an HTTP error
+        return str(exc), []
+    except OSError as exc:
+        return f"Sonatype request failed: {exc}", []
+    return "", [{"purl": p, "id": v.get("cve") or v.get("id"), "cvss": v.get("cvssScore"),
+                 "title": v.get("title", ""), "reference": v.get("reference")}
+                for p, vulns in results.items() for v in vulns]
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("sbom", type=Path)
+    ap.add_argument("--notes", type=Path)
+    ap.add_argument("--report", type=Path)
+    ap.add_argument("--json", type=Path)
+    a = ap.parse_args()
+
+    bom = json.loads(a.sbom.read_text(encoding="utf-8"))
+    purls = sorted({c["purl"] for c in bom.get("components", [])})
+    if not purls:
+        sys.exit("[audit] nothing to audit — refusing to report a clean result")
+
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    audits, problems = [], []
+    for label, check in (("OSV", check_osv), ("Sonatype (Sonatype Guide, OSS Index-compatible API)", check_sonatype)):
+        error, findings = check(purls)
+        audits.append({"database": label, "checked_at": now, "target": TARGET, "packages": purls,
+                       "advisories": findings, "error": error,
+                       "result": "pass" if not error and not findings else "fail"})
+        if error:
+            problems.append(error)
+
+    flagged = {f["purl"] for x in audits for f in x["advisories"]}
+    py = sum(p.startswith("pkg:pypi/") for p in purls)
+    lines = [f"Shipped components: {py} Python (Linux / 3.12), {len(purls) - py} npm — "
+             f"OSV and Sonatype: {len(flagged)} with findings"]
+    for x in audits:
+        for f in sorted(x["advisories"], key=lambda f: (f["purl"], f["id"])):
+            lines.append(f"  - {f['purl']}: {x['database'].split()[0]} {f['id']}"
+                         + (f" (CVSS {f['cvss']}) {f['title'][:90]}" if "cvss" in f else ""))
+    lines += [f"  NOT CHECKED: {p}" for p in problems]
+    print("\n".join(lines))
+    for path in (a.notes, a.report):
+        if path:
+            with path.open("a", encoding="utf-8") as f:
+                f.write("\n" + "\n".join(lines) + "\n")
+    if a.json:
+        a.json.write_text(json.dumps({"source": a.sbom.name, "audits": audits}, indent=1) + "\n", encoding="utf-8")
+
+    if flagged or problems:
+        sys.exit("[audit] release held: findings, or a database not checked")
+    print("[audit] clean")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -14,9 +14,10 @@ Install it into the same environment as [horo-next](https://pypi.org/project/hor
 Packaging and launch only. Product behaviour is upstream's.
 
 - **Works offline.** Prism, xterm, Mermaid and PDF.js are served from the wheel instead of cdn.jsdelivr.net.
-- **No known advisories in shipped code.** Every front-end library is moved to the lowest release in its major version with no OSV advisory. Mermaid is rebuilt so the DOMPurify it embeds is a fixed release too. Python dependency floors that admit a vulnerable version are raised. Each release notes exactly what changed.
+- **No known advisories in shipped code at release time**, in OSV or Sonatype's public data. Every front-end library is moved to the lowest clean release, and Mermaid is rebuilt from a lockfile so the DOMPurify it embeds is a fixed release too. Python dependency floors that admit a vulnerable version are raised. Each release notes exactly what changed.
 - **The launcher never installs anything.** Without Hermes Agent it tells you to `pip install horo-next`, instead of running upstream's GitHub installer or creating a virtualenv inside site-packages.
 - The server's working directory is the WebUI state directory, not site-packages.
+- **No automatic outbound traffic.** The GitHub update check is off by default, and the CSP names no CDN, analytics or font host.
 - Python 3.11–3.13.
 
 ## Versions
@@ -25,7 +26,7 @@ Packaging and launch only. Product behaviour is upstream's.
 
 ## Offline installation
 
-Each release attaches `requirements-X.Y.Z.txt`, the full resolved dependency set. On a machine with internet access:
+Each release attaches `requirements-X.Y.Z.txt`, the full resolved dependency set for Linux / CPython 3.12, and `requirements-X.Y.Z-hashes.txt`, the same set for `pip install --require-hashes`. On a machine with internet access:
 
 ```bash
 pip download horo-next-webui==X.Y.Z -d wheelhouse
@@ -37,6 +38,10 @@ Then on the offline machine:
 pip install --no-index --find-links wheelhouse horo-next-webui
 ```
 
+## Security review
+
+Each [GitHub release](https://github.com/iscodesnippet2/horo-next-webui/releases) attaches a CycloneDX SBOM, the vulnerability audit and the third-party notices. See the [security policy](https://github.com/iscodesnippet2/horo-next-webui/blob/horo/SECURITY.md) and the [reviewer's guide](https://github.com/iscodesnippet2/horo-next-webui/blob/horo/docs/security-review.md).
+
 ## License
 
-MIT. Hermes WebUI is copyright its contributors; bundled front-end libraries carry their own licenses.
+MIT. Hermes WebUI is copyright its contributors; bundled front-end libraries carry their own licenses, in `THIRD_PARTY_LICENSES` inside the wheel. KaTeX's fonts are OFL-1.1.

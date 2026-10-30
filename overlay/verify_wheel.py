@@ -100,7 +100,8 @@ print("JSON" + json.dumps(out))
     check(not set(data["top"]) & AGENT_TOP_LEVEL, "no top-level module collides with horo-next",
           str(sorted(set(data["top"]) & AGENT_TOP_LEVEL)))
     crypto = next((q for q in data["requires"] if q.lower().startswith("cryptography")), "")
-    check(">=50" in crypto, "cryptography floor raised", crypto)
+    floor = re.search(r">=\s*(\d+)", crypto)
+    check(bool(floor) and int(floor[1]) >= 50, "cryptography floor raised", crypto)
 
     # ── Launcher without Hermes Agent: refuse, never install ─────────────
     r = run(str(bindir / "hermes-webui"), "--no-browser")
@@ -139,6 +140,10 @@ print("JSON" + json.dumps(out))
         status, _, page = get("/")
         check(status == 200 and b"<title>" in page, "server serves the UI",
               f"HTTP {status}" if status != 200 else "")
+        with urllib.request.urlopen(base + "/", timeout=10) as resp:
+            csp = resp.headers.get("Content-Security-Policy", "")
+        check(csp and not re.search(r"jsdelivr|cloudflare|googleapis|gstatic", csp),
+              "CSP allows no CDN, analytics or font host", csp[:120])
         texts = {"/": page.decode("utf-8", "replace")}
         for js in ("/static/ui.js", "/static/boot.js", "/static/terminal.js", "/static/sw.js"):
             texts[js] = get(js)[2].decode("utf-8", "replace")
@@ -161,6 +166,9 @@ print("JSON" + json.dumps(out))
                   f"{status} {ctype}")
         else:
             check(False, "Prism is vendored")
+        settings = json.loads(get("/api/settings")[2] or b"{}")
+        check(settings.get("check_for_updates") is False, "update check is off by default",
+              str(settings.get("check_for_updates")))
         mermaid = next((r for r in refs if "/mermaid/" in r), "")
         body = get("/" + mermaid)[2] if mermaid else b""
         dp = re.search(rb"@license DOMPurify (\d+\.\d+\.\d+)", body)

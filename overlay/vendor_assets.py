@@ -22,14 +22,17 @@ their files are looked up in the new tarball under `dist/` or the package root.
 
 A prebuilt bundle can embed a vulnerable copy of a dependency that no release
 of the library fixes: every Mermaid release up to 12.1.0 embeds a DOMPurify
-with open advisories. Libraries in REBUILD are therefore rebuilt here from the
-npm package with esbuild, every package in their resolved tree checked against
-OSV, and any vulnerable one overridden to its lowest clean semver-compatible
-release. Needs Node and npm (HORO_NPM, default `npm`).
+with open advisories. Libraries in REBUILD are therefore rebuilt here with
+esbuild from a lockfile committed under overlay/<library>/ (`npm ci
+--ignore-scripts`, so no package runs code at build time). Every locked package
+is checked; a vulnerable one is raised with `npm update`, kept out of the
+cooldown by `--before`, and the fix asserted in the lock. What the bundle
+actually contains comes from esbuild's metafile, not from the tree.
+Needs Node and npm (HORO_NPM, default `npm`).
 
 Fails closed: an unparseable reference, a library with no clean semver-compatible
-release, a missing file in the new tarball, or a CDN URL left in the front end
-stops the build.
+release, a fix still inside the 14-day cooldown, a missing file in the new
+tarball, or a CDN URL left in the front end stops the build.
 """
 from __future__ import annotations
 
@@ -45,12 +48,16 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import urllib.parse
 import urllib.request
 from pathlib import Path
 
 from packaging.version import InvalidVersion, Version
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cooldown  # noqa: E402
+import sonatype  # noqa: E402
+
+HERE = Path(__file__).resolve().parent
 ROOT = Path(sys.argv[1]).resolve()
 NOTES = Path(sys.argv[sys.argv.index("--notes") + 1]) if "--notes" in sys.argv else None
 STATIC = ROOT / "static"
@@ -65,15 +72,17 @@ SINGLE = {"smd.min.js": ("streaming-markdown", "index.html", r"npm:streaming-mar
 # Prism's autoloader fetches components/prism-<lang>.min.js on demand.
 EXTRA = {"prismjs": ["components/"]}
 # Bundles rebuilt from source: package → (bundle path in package, global name).
-REBUILD = {"mermaid": ("dist/mermaid.min.js", "mermaid")}
-ESBUILD = "0.28.2"
+# Each has package.json, package-lock.json and entry.mjs under overlay/<package>/.
+REBUILD = {"mermaid": "dist/mermaid.min.js"}
 NPM = shlex.split(os.environ.get("HORO_NPM", "npm"))
+OSV = os.environ.get("HORO_OSV_URL", "https://api.osv.dev")
+REGISTRY = os.environ.get("HORO_NPM_REGISTRY", "https://registry.npmjs.org")
 
 failures: list[str] = []
 notes: list[str] = []
 # Every npm component the wheel ships, for audit_shipped.py and the daily
 # rescan: (name, version) → how it ships.
-shipped: dict[tuple[str, str], str] = {}
+shipped: dict[tuple[str, str], set[str]] = {}
 
 
 def fail(msg: str) -> None:
@@ -92,42 +101,25 @@ def get_json(url: str, payload: dict | None = None) -> dict:
 # exp-v0.52.416 it held Mermaid 10.9.8 and PDF.js 4.9.155 vulnerable where OSV
 # did not. Versions are chosen clean in BOTH. Without SONATYPE_GUIDE_TOKEN the
 # choice is OSV-only, and audit_shipped.py holds the release.
-SONATYPE = "https://api.guide.sonatype.com/api/v3/component-report"
-SONATYPE_TOKEN = os.environ.get("SONATYPE_GUIDE_TOKEN", "").strip()
 _sonatype: dict[tuple[str, str], list[str]] = {}
-if not SONATYPE_TOKEN:
+if not sonatype.available():
     print("[vendor] WARN SONATYPE_GUIDE_TOKEN not set — choosing versions by OSV only")
 
 
-def npm_purl(name: str, version: str) -> str:
-    return f"pkg:npm/{name.replace('@', '%40', 1) if name.startswith('@') else name}@{version}"
-
-
-def sonatype(pkgs: list[tuple[str, str]]) -> dict[tuple[str, str], list[str]]:
-    """Sonatype findings per (name, version); cached, batched 128 per request."""
-    todo = [p for p in dict.fromkeys(pkgs) if p not in _sonatype]
-    if SONATYPE_TOKEN:
-        auth = "Basic " + base64.b64encode(f"horo:{SONATYPE_TOKEN}".encode()).decode()
-        for i in range(0, len(todo), 128):
-            chunk = todo[i:i + 128]
-            by_purl = {urllib.parse.unquote(npm_purl(*p)).lower(): p for p in chunk}
-            req = urllib.request.Request(SONATYPE, data=json.dumps(
-                {"coordinates": [npm_purl(*p) for p in chunk]}).encode(),
-                headers={"Content-Type": "application/json", "Authorization": auth})
-            with urllib.request.urlopen(req, timeout=120) as r:
-                for entry in json.load(r):
-                    key = by_purl.get(urllib.parse.unquote(entry.get("coordinates", "")).lower())
-                    if key:
-                        _sonatype[key] = [f"sonatype:{v.get('cve') or v.get('id')}"
-                                          for v in entry.get("vulnerabilities", [])]
+def sonatype_ids(pkgs: list[tuple[str, str]]) -> dict[tuple[str, str], list[str]]:
+    """Sonatype findings per (name, version); cached."""
+    todo = {sonatype.npm_purl(*p): p for p in dict.fromkeys(pkgs) if p not in _sonatype}
+    if todo and sonatype.available():
+        for purl, vulns in sonatype.report(list(todo)).items():
+            _sonatype[todo[purl]] = [f"sonatype:{v.get('cve') or v.get('id')}" for v in vulns]
     return {p: _sonatype.get(p, []) for p in pkgs}
 
 
 def advisories(name: str, version: str) -> list[str]:
-    res = get_json("https://api.osv.dev/v1/query",
+    res = get_json(f"{OSV}/v1/query",
                    {"package": {"name": name, "ecosystem": "npm"}, "version": version})
     ids = [v["id"] for v in res.get("vulns", []) if not v.get("withdrawn")]
-    return ids + sonatype([(name, version)])[(name, version)]
+    return ids + sonatype_ids([(name, version)])[(name, version)]
 
 
 # Semver-compatible means same major, or same minor below 1.0. Crossing that
@@ -160,22 +152,29 @@ def compatible(name: str, cur: Version, pv: Version) -> bool:
 
 
 def clean_version(name: str, current: str) -> tuple[str | None, list[str]]:
-    """Lowest semver-compatible release >= current with no advisory."""
+    """Lowest semver-compatible release >= current with no advisory.
+
+    None when there is none, or when it is still inside the cooldown: lower
+    releases are older but vulnerable, so the release waits."""
     found = advisories(name, current)
     if not found:
         return current, []
     cur = Version(current)
+    doc = get_json(f"{REGISTRY}/{name}")
     versions = []
-    for v in get_json(f"https://registry.npmjs.org/{name}")["versions"]:
+    for v in doc["versions"]:
         try:
             pv = Version(v)
         except InvalidVersion:
             continue
         if not pv.is_prerelease and pv > cur and compatible(name, cur, pv):
             versions.append(pv)
-    sonatype([(name, str(pv)) for pv in versions])  # one batched request
+    sonatype_ids([(name, str(pv)) for pv in versions])  # one batched request
     for pv in sorted(versions):
         if not advisories(name, str(pv)):
+            if cooldown.inside(doc["time"][str(pv)]):
+                print(f"[vendor] FAIL {name}: the only fix, {pv}, is inside the {cooldown.DAYS}-day cooldown")
+                return None, found
             return str(pv), found
     return None, found
 
@@ -184,69 +183,103 @@ def advisory_batch(pkgs: list[tuple[str, str]]) -> dict[tuple[str, str], list[st
     hits = {}
     for i in range(0, len(pkgs), 500):
         chunk = pkgs[i:i + 500]
-        res = get_json("https://api.osv.dev/v1/querybatch", {"queries": [
+        res = get_json(f"{OSV}/v1/querybatch", {"queries": [
             {"package": {"name": n, "ecosystem": "npm"}, "version": v} for n, v in chunk]})
+        if len(res["results"]) != len(chunk):
+            raise RuntimeError("OSV did not answer for every package")
         for key, r in zip(chunk, res["results"]):
             ids = [x["id"] for x in r.get("vulns", []) if not x.get("withdrawn")]
             if ids:
                 hits[key] = ids
-    for key, ids in sonatype(pkgs).items():
+    for key, ids in sonatype_ids(pkgs).items():
         if ids:
             hits.setdefault(key, []).extend(ids)
     return hits
 
 
-def rebuild(name: str, version: str, bundle: str, global_name: str, dest: Path) -> list[str]:
-    """Bundle name@version with esbuild after clearing its tree of advisories.
+def package_dir(path: str) -> str | None:
+    """'node_modules/a/node_modules/@s/b/lib/x.js' → 'node_modules/a/node_modules/@s/b'
+    (the innermost node_modules: nested copies are separate packages)."""
+    i = path.rfind("node_modules/")
+    if i < 0:
+        return None
+    rest = path[i + len("node_modules/"):].split("/")
+    n = 2 if rest[0].startswith("@") else 1
+    return path[:i] + "node_modules/" + "/".join(rest[:n]) if len(rest) > n else None
 
-    Returns the overrides applied, as notes. Raises RuntimeError when an
-    advisory has no clean semver-compatible release.
-    """
+
+def npm(work: Path, *args: str) -> None:
+    r = subprocess.run([*NPM, *args, "--ignore-scripts", "--no-audit", "--no-fund"],
+                       cwd=work, capture_output=True, text=True)
+    if r.returncode:
+        raise RuntimeError(f"npm {args[0]} failed: {r.stderr[-400:]}")
+
+
+def rebuild(name: str, version: str, dest: Path) -> list[str]:
+    """Bundle overlay/<name>/entry.mjs from its lockfile, cleared of advisories.
+
+    Returns the raises applied, as notes. Raises RuntimeError when an advisory
+    has no fix `npm update` can reach outside the cooldown."""
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
-        (work / "entry.mjs").write_text(
-            f'import lib from "{name}";\nglobalThis.{global_name} = lib;\n', encoding="utf-8")
-        overrides: dict[str, str] = {}
+        for f in ("package.json", "package-lock.json", "entry.mjs"):
+            shutil.copy(HERE / name / f, work / f)
+
+        def packages() -> dict[str, dict]:
+            return json.loads((work / "package-lock.json").read_text(encoding="utf-8"))["packages"]
+
+        def tree() -> list[tuple[str, str]]:
+            return sorted({(meta.get("name") or path.rsplit("node_modules/", 1)[-1], meta["version"])
+                           for path, meta in packages().items() if path and not meta.get("dev")})
+
+        before = f"--before={cooldown.stamp()}"
         applied: list[str] = []
-        for _ in range(5):
-            (work / "package.json").write_text(json.dumps({
-                "private": True, "dependencies": {name: version, "esbuild": ESBUILD},
-                "overrides": overrides}, indent=1), encoding="utf-8")
-            r = subprocess.run([*NPM, "install", "--ignore-scripts", "--no-audit", "--no-fund"],
-                               cwd=work, capture_output=True, text=True)
-            if r.returncode:
-                raise RuntimeError(f"npm install failed: {r.stderr[-400:]}")
-            lock = json.loads((work / "package-lock.json").read_text(encoding="utf-8"))
-            tree = sorted({(path.rsplit("node_modules/", 1)[-1], meta["version"])
-                           for path, meta in lock["packages"].items()
-                           if path and "version" in meta and not meta.get("dev")
-                           and "esbuild" not in path})
-            hits = advisory_batch(tree)
+        if packages().get(f"node_modules/{name}", {}).get("version") != version:
+            npm(work, "install", "--package-lock-only", "--save-exact", f"{name}@{version}")
+            applied.append(f"{name} locked at {version}")
+        for _ in range(3):
+            pkgs = tree()
+            hits = advisory_batch(pkgs)
             if not hits:
                 break
-            for (dep, ver), ids in hits.items():
-                new, _ = clean_version(dep, ver)
-                if new is None:
-                    raise RuntimeError(f"bundled {dep}@{ver}: {ids} and no clean semver-compatible release")
-                overrides[dep] = new
-                applied.append(f"{dep} {ver} → {new} (fixes {', '.join(ids)})")
+            npm(work, "update", "--package-lock-only", before, *sorted({n for n, _ in hits}))
+            now = set(tree())
+            stuck = sorted(k for k in hits if k in now)
+            if stuck:
+                raise RuntimeError(f"still locked after `npm update`: {stuck} ({[hits[k] for k in stuck]}); "
+                                   f"no fix in range outside the {cooldown.DAYS}-day cooldown")
+            applied += [f"{n} {v} raised (fixes {', '.join(ids)})" for (n, v), ids in hits.items()]
         else:
-            raise RuntimeError(f"tree still has advisories after overrides: {hits}")
+            raise RuntimeError(f"advisories remain after `npm update`: {hits}")
+        npm(work, "ci")
+        metafile = work / "meta.json"
         r = subprocess.run([str(work / "node_modules" / ".bin" / "esbuild"), "entry.mjs", "--bundle",
                             "--minify", "--format=iife", "--platform=browser", "--target=es2020",
-                            "--legal-comments=inline", f"--outfile={dest}"],
+                            "--legal-comments=inline", f"--metafile={metafile}", f"--outfile={dest}"],
                            cwd=work, capture_output=True, text=True)
         if r.returncode:
             raise RuntimeError(f"esbuild failed: {r.stderr[-400:]}")
-        print(f"[vendor] ok   {name}@{version}: rebuilt, {len(tree)} bundled packages, no advisory")
-        for dep, ver in tree:
+        # The bundle's contents, from esbuild: a locked package tree-shaken
+        # away to nothing is not shipped; one it pulled in is.
+        outputs = json.loads(metafile.read_text(encoding="utf-8"))["outputs"]
+        lock, dirs = packages(), set()
+        for out in outputs.values():
+            dirs |= {package_dir(p) for p, i in out["inputs"].items() if i["bytesInOutput"]}
+        dirs.discard(None)
+        unknown = sorted(d for d in dirs if d not in lock)
+        if unknown or f"node_modules/{name}" not in dirs:
+            raise RuntimeError(f"bundle does not match the lock: {unknown[:5]}")
+        bundled = {(lock[d].get("name") or d.rsplit("node_modules/", 1)[-1], lock[d]["version"]) for d in dirs}
+        print(f"[vendor] ok   {name}@{version}: rebuilt, {len(bundled)} packages in the bundle "
+              f"of {len(tree())} locked, no advisory")
+        for dep, ver in sorted(bundled):
             if dep != name:
-                shipped.setdefault((dep, ver), f"bundled in {name}@{version}")
+                shipped.setdefault((dep, ver), set()).add(f"bundled in {name}@{version}")
         return applied
 
 
 def tarball(name: str, version: str) -> tarfile.TarFile:
-    dist = get_json(f"https://registry.npmjs.org/{name}/{version}")["dist"]
+    dist = get_json(f"{REGISTRY}/{name}/{version}")["dist"]
     with urllib.request.urlopen(dist["tarball"], timeout=300) as r:
         data = r.read()
     algo, _, want = dist["integrity"].partition("-")
@@ -281,7 +314,7 @@ def rewrite(old: str, new: str) -> int:
 
 
 def record(name: str, old: str, new: str, ids: list[str], how: str) -> None:
-    shipped[(name, new)] = "static/vendor"
+    shipped.setdefault((name, new), set()).add("static/vendor")
     fixed = f"{old} → {new}, fixes {', '.join(ids)}" if ids else f"{old}, no advisory"
     notes.append(f"- {name}: {fixed} ({how})")
     print(f"[vendor] ok   {name}: {fixed} ({how})")
@@ -297,7 +330,7 @@ for p in front_end_files():
 for (name, ver), paths in sorted(cdn.items()):
     new, ids = clean_version(name, ver)
     if new is None:
-        fail(f"{name}@{ver}: {len(ids)} advisories and no clean semver-compatible release")
+        fail(f"{name}@{ver}: {len(ids)} advisories and no clean semver-compatible release outside the cooldown")
         continue
     dest_root = VENDOR / name / new
     try:
@@ -311,10 +344,10 @@ for (name, ver), paths in sorted(cdn.items()):
         extract(tf, want)
         how = f"self-hosted, {len(want)} files"
         if name in REBUILD:
-            bundle, global_name = REBUILD[name]
+            bundle = REBUILD[name]
             if bundle not in paths:
                 raise KeyError(f"{bundle} is no longer what upstream loads ({sorted(paths)})")
-            applied = rebuild(name, new, bundle, global_name, dest_root / bundle)
+            applied = rebuild(name, new, dest_root / bundle)
             how = "rebuilt with esbuild" + (f"; bundled {'; '.join(applied)}" if applied else "")
     except (KeyError, RuntimeError, OSError) as exc:
         fail(f"{name}@{new}: {exc}")
@@ -330,7 +363,7 @@ for d in sorted(VENDOR.glob("*/*")):
     name, ver = d.parent.name, d.name
     new, ids = clean_version(name, ver)
     if new is None:
-        fail(f"{name}@{ver}: {len(ids)} advisories and no clean semver-compatible release")
+        fail(f"{name}@{ver}: {len(ids)} advisories and no clean semver-compatible release outside the cooldown")
         continue
     if new == ver:
         record(name, ver, ver, [], "vendored upstream")
@@ -422,7 +455,7 @@ for p in front_end_files():
             fail(f"{p.relative_to(ROOT)} references absent static/vendor/{m['name']}/{m['ver']}/")
 
 (ROOT / "horo-vendor.json").write_text(json.dumps(
-    [{"name": n, "version": v, "ships": how} for (n, v), how in sorted(shipped.items())],
+    [{"name": n, "version": v, "ships": sorted(how)} for (n, v), how in sorted(shipped.items())],
     indent=1) + "\n", encoding="utf-8")
 
 if NOTES:

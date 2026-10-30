@@ -24,18 +24,25 @@ committed here**. The default branch, `horo`, holds only the tooling:
 
 | Path | What it does |
 |---|---|
-| `overlay/horo_overlay.py` | Packaging and launcher changes applied to an upstream checkout |
+| `overlay/horo_overlay.py` | Packaging, metadata, launcher and outbound-traffic changes applied to an upstream checkout |
 | `overlay/security_bump.py` | Raises Python dependency floors that admit a vulnerable version |
-| `overlay/vendor_assets.py` | Self-hosts every front-end library at its lowest advisory-free release in the same major; rebuilds Mermaid so its embedded DOMPurify is fixed too |
+| `overlay/vendor_assets.py` | Self-hosts every front-end library at its lowest advisory-free release; rebuilds Mermaid from a lockfile |
+| `overlay/mermaid/` | The Mermaid build: entry point, `package.json`, committed `package-lock.json` |
+| `overlay/cooldown.py` | The 14-day cooldown on third-party releases |
+| `overlay/sonatype.py` | Sonatype Guide client, shared by every step that consults it |
+| `overlay/sbom.py` | CycloneDX 1.5 SBOM and third-party notices; embeds the SBOM in the wheel (PEP 770) |
+| `overlay/audit_shipped.py` | Checks every SBOM component against OSV **and Sonatype**; needs the `SONATYPE_GUIDE_TOKEN` secret |
+| `overlay/verify_release.py` | Checks the wheel, SBOM, notices, hashes and audit against each other |
 | `overlay/verify_wheel.py` | Installs the wheel into a clean venv, starts the server, fetches every vendored asset |
 | `overlay/browser_smoke.py` | Runs upstream's Mermaid, KaTeX, PDF.js, Prism and xterm render paths in Chromium from the installed wheel, offline |
+| `overlay/tests/` | Gate tests against fake services, and mutation tests on real release files |
 | `overlay/sonatype_lookup.py` | Lists Sonatype's findings for every version of a package (via the `sonatype-lookup` workflow), to pick a replacement |
-| `overlay/audit.py` | Checks the resolved Linux / Python 3.12 dependency set against OSV |
-| `overlay/audit_shipped.py` | Checks every shipped component — Python and npm, bundled ones included — against OSV **and Sonatype** (the enterprise mirror's scanner); needs the `SONATYPE_GUIDE_TOKEN` secret |
 | `.github/workflows/rescan.yml` | Re-audits the latest release daily; opens an issue on a new advisory |
 | `airgap/probe.py` | Run on an air-gapped machine: which dependencies the mirror serves |
 | `pypi/README.md` | The project page shown on PyPI |
-| `.github/workflows/release.yml` | Tag → overlay → floors → front end → wheel → audit → verify → TestPyPI → PyPI |
+| `.github/workflows/release.yml` | Tag → overlay → floors → front end → SBOM → wheel → audit → verify → TestPyPI → PyPI |
+
+Security policy: [SECURITY.md](SECURITY.md). For a reviewer: [docs/security-review.md](docs/security-review.md).
 
 `master` mirrors upstream and is not used by the release workflow.
 
@@ -43,17 +50,24 @@ committed here**. The default branch, `horo`, holds only the tooling:
 
 **Packaging and launch only.** Product behaviour is upstream's. The launcher
 is changed because, installed from a wheel, upstream's would pipe a GitHub
-installer into bash or create a virtualenv inside site-packages.
+installer into bash or create a virtualenv inside site-packages. The one
+runtime default changed is the automatic GitHub update check, now off; the CSP
+no longer names CDN, analytics or font hosts.
 
 **Fail closed.** Code edits use exact anchors and stop the build if upstream
-moved them. A library with no advisory-free release in its major version, a
-CDN URL left in the front end, or an advisory in the resolved Python set holds
-the release.
+moved them. A library with no advisory-free release in its allowed line, a
+fix still inside the cooldown, a CDN URL left in the front end, an advisory in
+the resolved set, or a component a database did not answer for holds the
+release.
 
 **Smallest clean change.** A vulnerable library moves to the lowest release
-that has no advisory, within its major version, so no API breaks. Python floors
-are raised the same way; transitive Python dependencies get no floor (pip
-already picks the newest the index has), but the resolved set is audited.
+that has no advisory, within its semver line, so no API breaks; KaTeX, Mermaid
+and PDF.js cross one by an explicit allowlist (`ALLOW_BREAKING`). Python floors
+are raised the same way; transitive Python dependencies get no floor, but the
+resolved set is audited.
+
+**Fourteen days, no exceptions.** Nothing younger than 14 days ships. When the
+only fix for an advisory is inside the cooldown, the release waits for it.
 
 **Verify by installing, not by building.** Upstream's own wheel builds and
 uploads cleanly and cannot start. Every release is installed into a clean venv
@@ -74,9 +88,10 @@ the fix is the same upstream tag rebuilt as `X.Y.Z.postN`.
 - `package.json` dev tooling (ESLint) — never shipped.
 - Libraries a bundle embeds, other than Mermaid's tree (rebuilt and audited
   package by package): KaTeX, PDF.js, Prism, xterm, js-yaml and
-  streaming-markdown ship as single files with no runtime dependencies.
-- The CSP still lists cdn.jsdelivr.net. Nothing loads from it; the header is
-  upstream's.
+  streaming-markdown ship as upstream publishes them.
+- Network features a user has to invoke (OAuth sign-in, cloud TTS and
+  transcription, the extension gallery, hosted model providers) remain. Offline
+  they fail and do nothing else.
 
 ## Releasing
 
@@ -101,6 +116,12 @@ python overlay/security_bump.py upstream --notes release-notes.md
 HORO_NPM="npx -y npm@11.21.0" python overlay/vendor_assets.py upstream --notes release-notes.md
 (cd upstream && uv build --wheel --out-dir ../dist)
 python overlay/verify_wheel.py dist/horo_next_webui-0.52.416-py3-none-any.whl 3.12 0.52.416
+python -m unittest discover -s overlay/tests -p 'test_*.py'
 ```
 
-Requires `packaging`, `uv`, and Node 22 with npm.
+Requires `packaging`, `uv`, and Node 22 with npm. Without the Sonatype token,
+`overlay/tests/sonatype_replay.py` serves Sonatype's known answers (point
+`SONATYPE_GUIDE_URL` at it) so versions match CI; it proves the pipeline, not
+the data. To change the Mermaid build, edit `overlay/mermaid/package.json` and
+regenerate the lock with `npm install --package-lock-only --ignore-scripts
+--before=<14 days ago>`.

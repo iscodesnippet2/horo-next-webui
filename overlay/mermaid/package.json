@@ -1,0 +1,13 @@
+{
+  "name": "horo-next-webui-mermaid",
+  "private": true,
+  "dependencies": {
+    "mermaid": "11.16.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  },
+  "overrides": {
+    "katex": "0.18.2"
+  }
+}

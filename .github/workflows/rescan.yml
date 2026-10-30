@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
 
-      - name: Fetch the latest release's component lists
+      - name: Fetch the latest release's SBOM
         id: rel
         env:
           GH_TOKEN: ${{ github.token }}
@@ -29,7 +29,7 @@ jobs:
           tag=$(gh release view --repo "${{ github.repository }}" --json tagName --jq .tagName 2>/dev/null || true)
           if [ -z "$tag" ]; then echo "No release published yet."; echo "tag=" >> "$GITHUB_OUTPUT"; exit 0; fi
           gh release download "$tag" --repo "${{ github.repository }}" \
-            --pattern 'requirements-*.txt' --pattern 'horo-vendor-*.json' --dir rel
+            --pattern '*.cdx.json' --dir rel
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Audit against OSV and Sonatype
@@ -38,8 +38,7 @@ jobs:
         env:
           SONATYPE_GUIDE_TOKEN: ${{ secrets.SONATYPE_GUIDE_TOKEN }}
         run: |
-          uv run --with packaging python overlay/audit_shipped.py \
-            rel/requirements-*.txt rel/horo-vendor-*.json --report report.md
+          uv run python overlay/audit_shipped.py rel/*.cdx.json --report report.md
 
       - name: Open or update an issue
         if: failure() && steps.audit.outcome == 'failure'

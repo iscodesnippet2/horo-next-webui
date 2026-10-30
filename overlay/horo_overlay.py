@@ -33,6 +33,7 @@ ROOT = Path(sys.argv[1]).resolve()
 EXPECTED_VERSION = sys.argv[2]
 
 DIST_NAME = "horo-next-webui"
+REPO = "https://github.com/iscodesnippet2/horo-next-webui"
 # Upstream CI and classifiers cover 3.11–3.13. 3.14 is not vouched for.
 REQUIRES_PYTHON = ">=3.11,<3.14"
 # The air-gapped machines run CPython 3.12.
@@ -85,6 +86,23 @@ shutil.copy(HERE.parent / "pypi" / "README.md", ROOT / "README-PYPI.md")
 edit("pyproject.toml", 'readme = "README.md"', 'readme = "README-PYPI.md"')
 sub_once("pyproject.toml", r'^requires-python = ".*?"$', f'requires-python = "{REQUIRES_PYTHON}"',
          "requires-python")
+
+# Security review systems (Sonatype and others) follow Project-URL to the
+# source, and read the maintainer to tell this repackaging from the original.
+# PEP 639: an SPDX expression, with which a License classifier may not coexist.
+edit("pyproject.toml", 'license = {text = "MIT"}', 'license = "MIT"\nlicense-files = ["LICENSE"]')
+edit("pyproject.toml", 'authors = [{name = "Hermes WebUI contributors"}]',
+     'authors = [{name = "Hermes WebUI contributors"}]\n'
+     'maintainers = [{name = "horo-next-webui contributors"}]')
+edit("pyproject.toml", '    "License :: OSI Approved :: MIT License",\n',
+     '    "Operating System :: POSIX :: Linux",\n    "Operating System :: MacOS",\n')
+edit("pyproject.toml",
+     'Repository = "https://github.com/nesquena/hermes-webui"\n'
+     'Issues = "https://github.com/nesquena/hermes-webui/issues"\n',
+     f'Source = "{REPO}"\n'
+     f'Issues = "{REPO}/issues"\n'
+     f'Security = "{REPO}/blob/horo/SECURITY.md"\n'
+     'Upstream = "https://github.com/nesquena/hermes-webui"\n')
 
 # ── 2. Static version ────────────────────────────────────────────────────
 # Upstream derives the version from git tags with setuptools-scm. Its tags are
@@ -158,6 +176,29 @@ edit("api/routes.py",
      '    "js": "application/javascript",\n    "html": "text/html",\n',
      '    "js": "application/javascript",\n    "mjs": "application/javascript",\n    "html": "text/html",\n')
 
+# ── 6. No outbound traffic nobody asked for ──────────────────────────────
+# The air-gapped target has no route out. Upstream checks GitHub for updates on
+# every page load, and allows CDN, analytics and web-font hosts in its CSP. A
+# wheel updates through pip, and nothing here loads from those hosts, so the
+# check is off by default (the setting remains) and the hosts leave the policy.
+# Other network features (OAuth, cloud TTS, the extension gallery) run only when
+# a user invokes them, and are left as upstream's.
+edit("api/config.py",
+     '    "check_for_updates": True,  # check if webui/agent repos are behind upstream\n',
+     '    "check_for_updates": False,  # horo-next-webui: wheels update through pip\n')
+for old, new in (
+    ("\"default-src 'self' https://*.cloudflareaccess.com; \"", "\"default-src 'self'; \""),
+    ("\"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com blob:; \"",
+     "\"script-src 'self' 'unsafe-inline' blob:; \""),
+    ("\"worker-src blob: 'self' https://cdn.jsdelivr.net; \"", "\"worker-src blob: 'self'; \""),
+    ("\"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; \"",
+     "\"style-src 'self' 'unsafe-inline'; \""),
+    ("\"font-src 'self' data: https://fonts.gstatic.com; \"", "\"font-src 'self' data:; \""),
+    ("\"manifest-src 'self' https://*.cloudflareaccess.com; \"", "\"manifest-src 'self'; \""),
+    ('f"{_CSP_CONNECT_BASE} https://cdn.jsdelivr.net{extra_connect_src}"', 'f"{_CSP_CONNECT_BASE}{extra_connect_src}"'),
+):
+    edit("api/helpers.py", old, new)
+
 # ── Postconditions ───────────────────────────────────────────────────────
 try:
     from packaging.requirements import Requirement
@@ -171,6 +212,12 @@ if project.get("name") != DIST_NAME:
     fail(f"name is {project.get('name')!r}")
 if "Unofficial" not in project.get("description", ""):
     fail(f"description does not say it is unofficial: {project.get('description')!r}")
+if project.get("urls", {}).get("Source") != REPO:
+    fail(f"Source URL is not this repository: {project.get('urls')}")
+if project.get("license") != "MIT":
+    fail(f"license is not the SPDX expression MIT: {project.get('license')!r}")
+if any(c.startswith("License ::") for c in project.get("classifiers", [])):
+    fail("a License classifier remains beside the SPDX expression")
 if project.get("version") != EXPECTED_VERSION:
     fail(f"version {project.get('version')!r} != expected {EXPECTED_VERSION!r}")
 if "tool" in meta and "setuptools_scm" in meta["tool"]:

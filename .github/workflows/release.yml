@@ -1,8 +1,9 @@
 # Build one upstream Hermes WebUI release as horo-next-webui and publish it.
 #
-#   upstream tag  ──overlay──▶  Python floors  ──▶  front-end libraries  ──▶  wheel
-#   ──▶  advisory audit  ──▶  verify on every supported Python  ──▶  TestPyPI
-#   ──▶  (approval)  ──▶  PyPI + GitHub release
+#   upstream tag  ──overlay──▶  Python floors  ──▶  front-end libraries
+#   ──▶  pinned dependencies  ──▶  SBOM + notices  ──▶  wheel  ──▶  advisory audit
+#   ──▶  verify on every supported Python  ──▶  TestPyPI  ──▶  (approval)
+#   ──▶  PyPI + GitHub release
 #
 # Upstream code is never committed to this repository. Each run clones the tag
 # fresh, so a release is a pure function of (upstream tag, overlay/) — and of
@@ -47,6 +48,11 @@ jobs:
         with:
           node-version: 22
 
+      # The gate itself, offline, against fakes: a rejected token, an unanswered
+      # component, a fix inside the cooldown must each hold a release.
+      - name: Test the release gate
+        run: uv run --with packaging python -m unittest discover -s overlay/tests -p 'test_*.py'
+
       - name: Clone the upstream release
         run: |
           git clone --depth 1 --branch "${{ inputs.upstream_tag }}" \
@@ -59,6 +65,8 @@ jobs:
         run: uv run --with packaging python overlay/horo_overlay.py upstream "${{ inputs.version }}"
 
       - name: Raise vulnerable Python dependency floors
+        env:
+          SONATYPE_GUIDE_TOKEN: ${{ secrets.SONATYPE_GUIDE_TOKEN }}
         run: uv run --with packaging python overlay/security_bump.py upstream --notes release-notes.md
 
       - name: Self-host front-end libraries at advisory-free versions
@@ -69,23 +77,32 @@ jobs:
           SONATYPE_GUIDE_TOKEN: ${{ secrets.SONATYPE_GUIDE_TOKEN }}
         run: uv run --with packaging python overlay/vendor_assets.py upstream --notes release-notes.md
 
+      # The air-gapped target is Linux / CPython 3.12. What `pip install
+      # horo-next-webui` resolves today, outside the 14-day cooldown, is the
+      # offline list. A vulnerable resolved package holds the release at the
+      # audit below: nothing newer is allowed, so there is nothing to raise to.
+      - name: Pin the dependency set for Linux / Python 3.12
+        run: |
+          args="--python-version 3.12 --python-platform x86_64-manylinux_2_28 --no-header -q"
+          args="$args --exclude-newer $(uv run python overlay/cooldown.py)"
+          uv pip compile upstream/requirements.txt $args -o "requirements-${{ inputs.version }}.txt"
+          uv pip compile upstream/requirements.txt $args --generate-hashes \
+            -o "requirements-${{ inputs.version }}-hashes.txt"
+
+      - name: Generate the SBOM and third-party notices
+        run: |
+          uv run python overlay/sbom.py generate upstream "${{ inputs.version }}" "${{ inputs.upstream_tag }}" \
+            --requirements "requirements-${{ inputs.version }}.txt" --out horo-next-webui.cdx.json
+          cp upstream/THIRD_PARTY_LICENSES THIRD_PARTY_LICENSES.txt
+
       - name: Build the wheel
         working-directory: upstream
         run: uv build --wheel --out-dir ../dist
 
-      # The air-gapped target is Linux / CPython 3.12. What `pip install
-      # horo-next-webui` resolves today is the offline list; any advisory in it
-      # holds the release.
-      - name: Audit dependencies for Linux / Python 3.12
+      - name: Embed the SBOM in the wheel (PEP 770)
         run: |
-          echo "" >> release-notes.md
-          echo "## Advisory audit — Linux / Python 3.12" >> release-notes.md
-          echo "dist/horo_next_webui-${{ inputs.version }}-py3-none-any.whl" > online.in
-          uv pip compile online.in --python-version 3.12 \
-            --python-platform x86_64-manylinux_2_28 --no-header -q -o resolved.txt
-          grep -v '^dist/' resolved.txt > "requirements-${{ inputs.version }}.txt"
-          uv run --with packaging python overlay/audit.py "requirements-${{ inputs.version }}.txt" \
-            "Dependencies, pip install" --fail --notes release-notes.md
+          uv run python overlay/sbom.py embed "dist/horo_next_webui-${{ inputs.version }}-py3-none-any.whl" \
+            horo-next-webui.cdx.json --release-copy "horo-next-webui-${{ inputs.version }}.cdx.json"
 
       # The enterprise mirror is guarded by Sonatype. Every shipped component —
       # Python and npm, bundled ones included — must be clean in OSV and in
@@ -94,12 +111,17 @@ jobs:
         env:
           SONATYPE_GUIDE_TOKEN: ${{ secrets.SONATYPE_GUIDE_TOKEN }}
         run: |
-          cp upstream/horo-vendor.json "horo-vendor-${{ inputs.version }}.json"
           echo "" >> release-notes.md
           echo "## Shipped-component audit — OSV and Sonatype" >> release-notes.md
-          uv run --with packaging python overlay/audit_shipped.py \
-            "requirements-${{ inputs.version }}.txt" "horo-vendor-${{ inputs.version }}.json" \
-            --notes release-notes.md
+          uv run python overlay/audit_shipped.py "horo-next-webui-${{ inputs.version }}.cdx.json" \
+            --notes release-notes.md --json "audit-${{ inputs.version }}.json"
+
+      - name: Check the release files against each other
+        run: |
+          v="${{ inputs.version }}"
+          files="dist/horo_next_webui-$v-py3-none-any.whl horo-next-webui-$v.cdx.json THIRD_PARTY_LICENSES.txt requirements-$v.txt requirements-$v-hashes.txt audit-$v.json $v"
+          uv run --with 'cyclonedx-python-lib[json-validation]==11.12.0' python overlay/verify_release.py $files
+          uv run --with 'cyclonedx-python-lib[json-validation]==11.12.0' python overlay/tests/mutate_release.py $files
 
       - id: meta
         run: echo "pythons=$(jq -c .pythons upstream/horo-build.json)" >> "$GITHUB_OUTPUT"
@@ -111,7 +133,10 @@ jobs:
             dist/
             release-notes.md
             requirements-${{ inputs.version }}.txt
-            horo-vendor-${{ inputs.version }}.json
+            requirements-${{ inputs.version }}-hashes.txt
+            horo-next-webui-${{ inputs.version }}.cdx.json
+            audit-${{ inputs.version }}.json
+            THIRD_PARTY_LICENSES.txt
             airgap/probe.py
           if-no-files-found: error
 
@@ -133,6 +158,14 @@ jobs:
           uv run --with packaging python overlay/verify_wheel.py \
             dist/horo_next_webui-${{ inputs.version }}-py3-none-any.whl \
             "${{ matrix.python }}" "${{ inputs.version }}"
+
+      - name: Install the hashed dependency set
+        if: matrix.python == '3.12'
+        run: |
+          uv venv --python 3.12 hashed
+          uv pip install --python hashed/bin/python --require-hashes -r "requirements-${{ inputs.version }}-hashes.txt"
+          uv pip install --python hashed/bin/python --no-deps dist/horo_next_webui-${{ inputs.version }}-py3-none-any.whl
+          uv pip check --python hashed/bin/python
 
       # Serving every file is not the same as working: run upstream's own
       # Mermaid, KaTeX, PDF.js, Prism and xterm paths in Chromium, offline.
@@ -188,5 +221,8 @@ jobs:
             --notes-file release-notes.md \
             dist/*.whl \
             "requirements-${{ inputs.version }}.txt" \
-            "horo-vendor-${{ inputs.version }}.json" \
+            "requirements-${{ inputs.version }}-hashes.txt" \
+            "horo-next-webui-${{ inputs.version }}.cdx.json" \
+            "audit-${{ inputs.version }}.json" \
+            THIRD_PARTY_LICENSES.txt \
             airgap/probe.py
