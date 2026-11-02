@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -73,6 +74,25 @@ PROBE = r"""async () => {
   return out;
 }"""
 
+# The mind map reads state.db directly. One session a person is in, one that is not,
+# both still open: finished sessions start collapsed.
+MINDMAP_DB = """
+CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, parent_session_id TEXT, end_reason TEXT,
+  ended_at REAL, started_at REAL, last_activity_at REAL, last_activity_description TEXT, message_count INTEGER);
+CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, timestamp REAL);
+"""
+
+
+def seed_mindmap(hermes_home: Path) -> None:
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    with sqlite3.connect(hermes_home / "state.db") as db:
+        db.executescript(MINDMAP_DB)
+        for sid, source in (("smoke-human", "desktop"), ("smoke-cron", "cron")):
+            db.execute("INSERT INTO sessions VALUES (?,?,?,NULL,NULL,NULL,?,?,NULL,1)", (sid, source, sid, now, now))
+            db.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?,'user','smoke',?)", (sid, now))
+
+
 failures: list[str] = []
 
 
@@ -86,6 +106,7 @@ with tempfile.TemporaryDirectory() as tmp:
     tmp = Path(tmp)
     venv, home = tmp / "venv", tmp / "home"
     home.mkdir()
+    seed_mindmap(home / ".hermes")
     subprocess.run(["uv", "venv", "-q", "--python", PYV, str(venv)], check=True)
     subprocess.run(["uv", "pip", "install", "-q", "--python", str(venv / "bin" / "python"), str(WHEEL)], check=True)
     py = venv / "bin" / "python"
@@ -130,6 +151,17 @@ with tempfile.TemporaryDirectory() as tmp:
             page.wait_for_function("typeof renderMermaidBlocks === 'function' && typeof Prism !== 'undefined'",
                                    timeout=30000)
             out = page.evaluate(PROBE)
+            page.evaluate("switchPanel('mindmap')")
+            page.wait_for_selector(".mm-card", timeout=15000)
+            map_requests: list[str] = []
+            page.on("request", lambda req: map_requests.append(req.url))
+            # Dispatched, not clicked: a fresh home sits behind the onboarding dialog.
+            page.evaluate("document.querySelector('.mm-card').click()")
+            page.wait_for_selector(".mm-detail", timeout=5000)
+            mindmap = page.evaluate("""() => ({
+              cards: [...document.querySelectorAll('.mm-card')].map(c => c.dataset.sid),
+              chat: getComputedStyle(document.getElementById('mainChat')).display,
+            })""")
             browser.close()
         print(f"  libraries: mermaid {out['mermaidVersion'] or '?'}, pdf.js {out['pdfjsVersion'] or '?'}, "
               f"katex {out['katexVersion'] or '?'}")
@@ -139,6 +171,9 @@ with tempfile.TemporaryDirectory() as tmp:
         check(out["pdf"], "PDF.js renders a page to canvas")
         check(out["prism"], "Prism highlights Python via its autoloader")
         check(out["xterm"], "xterm constructs a terminal")
+        check(mindmap["cards"] == ["smoke-human"], "mind map shows only the session a person is in", str(mindmap["cards"]))
+        check(mindmap["chat"] == "none", "mind map replaces the chat view")
+        check(not map_requests, "selecting a card makes no request", ", ".join(map_requests[:3]))
         check(not external, "no request leaves the machine", ", ".join(sorted(set(external))[:4]))
         check(not errors, "no uncaught page errors", " | ".join(errors[:3]))
     finally:

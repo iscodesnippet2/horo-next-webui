@@ -7,7 +7,7 @@ front end for Hermes Agent (packaged as horo-next). Upstream ships packaging
 metadata but publishes no maintained wheel, and its launcher assumes a source
 checkout: from site-packages it would pipe a GitHub installer into bash and
 create a virtualenv inside site-packages. This overlay changes packaging and
-launch only — never product behaviour.
+launch only, with one deliberate exception: the agent mind map (section 7).
 
 Two kinds of step, deliberately treated differently (as in horo-next):
 
@@ -198,6 +198,55 @@ for old, new in (
     ('f"{_CSP_CONNECT_BASE} https://cdn.jsdelivr.net{extra_connect_src}"', 'f"{_CSP_CONNECT_BASE}{extra_connect_src}"'),
 ):
     edit("api/helpers.py", old, new)
+
+# ── 7. Agent mind map ─────────────────────────────────
+# The one product feature added here. Its code is new files; upstream's are
+# touched only to hang them on: a route, a nav entry, a panel, two tags.
+MINDMAP = HERE / "mindmap"
+shutil.copy(MINDMAP / "horo_overview.py", ROOT / "api" / "horo_overview.py")
+shutil.copy(MINDMAP / "mindmap.js", ROOT / "static" / "mindmap.js")
+shutil.copy(MINDMAP / "mindmap.css", ROOT / "static" / "mindmap.css")
+ok("mind map files")
+edit("api/routes.py",
+     '    if parsed.path == "/api/session":\n        return _handle_session_get(handler, parsed)\n',
+     '    if parsed.path == "/api/horo/overview":\n'
+     '        from api.horo_overview import build as _horo_overview\n'
+     '        return j(handler, _horo_overview(_session_attention_summary,\n'
+     '                                         parse_qs(parsed.query).get("since", [""])[0]))\n\n'
+     '    if parsed.path == "/api/session":\n        return _handle_session_get(handler, parsed)\n')
+edit("static/panels.js", "'kanban','workspaces','profiles','insights','logs','plugin'];",
+     "'kanban','mindmap','workspaces','profiles','insights','logs','plugin'];")
+edit("static/panels.js", "  if (nextPanel === 'kanban') await loadKanban();\n",
+     "  if (prevPanel === 'mindmap' && nextPanel !== 'mindmap') hideMindmap();\n"
+     "  if (nextPanel === 'kanban') await loadKanban();\n"
+     "  if (nextPanel === 'mindmap') await showMindmap();\n")
+_MM_ICON = ('<svg width="{s}" height="{s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="{w}" '
+            'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/>'
+            '<circle cx="4" cy="6" r="2"/><circle cx="20" cy="6" r="2"/><circle cx="4" cy="18" r="2"/>'
+            '<circle cx="20" cy="18" r="2"/><path d="M9.5 10.5 5.7 7.1M14.5 10.5l3.8-3.4M9.5 13.5l-3.8 3.4M14.5 13.5l3.8 3.4"/></svg>')
+_MM_ATTRS = ('data-panel="mindmap" onclick="switchPanel(\'mindmap\',{fromRailClick:true})" '
+             'data-tooltip="心智圖" aria-label="心智圖"')
+sub_once("static/index.html", r'(    <button class="rail-btn nav-tab has-tooltip" data-panel="kanban"[^\n]*\n)',
+         lambda m: m.group(1) + f'    <button class="rail-btn nav-tab has-tooltip" {_MM_ATTRS}>'
+                   + _MM_ICON.format(s=20, w="1.5") + "</button>\n", "rail entry")
+sub_once("static/index.html", r'(      <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="kanban"[^\n]*\n)',
+         lambda m: m.group(1) + f'      <button class="nav-tab has-tooltip has-tooltip--bottom" {_MM_ATTRS} data-label="心智圖">'
+                   + _MM_ICON.format(s=18, w="2") + "</button>\n", "mobile nav entry")
+_MM_LEGEND = "".join(
+    f'<div class="mm-legend-row"><span class="mm-dot" style="background:{c}"></span>{t}</div>'
+    for c, t in (("#1d4ed8", "執行中"), ("#b45309", "等待你（跳動提醒）"), ("#6d28d9", "失敗"), ("#64748b", "已完成")))
+edit("static/index.html", '    <div class="panel-view" id="panelKanban">\n',
+     f'    <div class="panel-view" id="panelMindmap"><div class="panel-head"><span>心智圖</span></div>'
+     f'<div class="mm-legend">{_MM_LEGEND}</div></div>\n'
+     '    <div class="panel-view" id="panelKanban">\n')
+edit("static/index.html", '    <div id="mainKanban" class="main-view">\n',
+     '    <div id="mainMindmap" class="main-view"></div>\n    <div id="mainKanban" class="main-view">\n')
+edit("static/index.html", '<link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">\n',
+     '<link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">\n'
+     '<link rel="stylesheet" href="static/mindmap.css?v=__WEBUI_VERSION__">\n')
+edit("static/index.html", '<script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>\n',
+     '<script src="static/mindmap.js?v=__WEBUI_VERSION__" defer></script>\n'
+     '<script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>\n')
 
 # ── Postconditions ───────────────────────────────────────────────────────
 try:

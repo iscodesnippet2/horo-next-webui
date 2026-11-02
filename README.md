@@ -24,7 +24,8 @@ committed here**. The default branch, `horo`, holds only the tooling:
 
 | Path | What it does |
 |---|---|
-| `overlay/horo_overlay.py` | Packaging, metadata, launcher and outbound-traffic changes applied to an upstream checkout |
+| `overlay/horo_overlay.py` | Packaging, metadata, launcher and outbound-traffic changes applied to an upstream checkout; hangs the mind map on upstream's panels |
+| `overlay/mindmap/` | The agent mind map: `/api/horo/overview` read model, panel script and styles |
 | `overlay/security_bump.py` | Raises Python dependency floors that admit a vulnerable version |
 | `overlay/vendor_assets.py` | Self-hosts every front-end library at its lowest advisory-free release; rebuilds Mermaid from a lockfile |
 | `overlay/mermaid/` | The Mermaid build: entry point, `package.json`, committed `package-lock.json` |
@@ -48,7 +49,9 @@ Security policy: [SECURITY.md](SECURITY.md). For a reviewer: [docs/security-revi
 
 ## Principles
 
-**Packaging and launch only.** Product behaviour is upstream's. The launcher
+**Packaging and launch, plus one feature.** Product behaviour is upstream's,
+with one exception: the agent mind map, new files under `overlay/mindmap/` hung
+on a handful of exact anchors. The launcher
 is changed because, installed from a wheel, upstream's would pipe a GitHub
 installer into bash or create a virtualenv inside site-packages. The one
 runtime default changed is the automatic GitHub update check, now off; the CSP
@@ -82,6 +85,14 @@ a clean result narrows the gap with the mirror, it cannot close it.
 **A clean audit is a snapshot.** It holds on the day of the build. The daily
 rescan checks the latest release again and opens an issue on a new advisory;
 the fix is the same upstream tag rebuilt as `X.Y.Z.postN`.
+
+## Agent mind map
+
+A panel showing, across every profile, the sessions a person is part of (the
+source allowlist in `overlay/mindmap/horo_overview.py`; cron and kanban are out)
+from the last 72 hours: which run, which wait for you, what changed since you
+looked. It is read-only for now. Selecting a card uses only the overview, so it
+loads no transcript and leaves the active profile alone.
 
 ## What it does not cover
 
