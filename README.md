@@ -91,8 +91,12 @@ the fix is the same upstream tag rebuilt as `X.Y.Z.postN`.
 A panel showing, across every profile, the sessions a person is part of (the
 source allowlist in `overlay/mindmap/horo_overview.py`; cron and kanban are out)
 from the last 72 hours: which run, which wait for you, what changed since you
-looked. It is read-only for now. Selecting a card uses only the overview, so it
-loads no transcript and leaves the active profile alone.
+looked. Selecting a card uses only the overview, so it loads no transcript and
+leaves the active profile alone. Reply, stop, fork and pin act on any profile
+through `X-Horo-Profile`, a per-request override checked after authentication
+that refuses what `/api/profile/switch` refuses. Ctrl/Cmd-click or "開啟工作區"
+opens upstream's chat view as the workspace, which does switch the active
+profile; Esc or "返回心智圖" comes back without repainting the map.
 
 ## What it does not cover
 

@@ -214,6 +214,39 @@ edit("api/routes.py",
      '        return j(handler, _horo_overview(_session_attention_summary,\n'
      '                                         parse_qs(parsed.query).get("since", [""])[0]))\n\n'
      '    if parsed.path == "/api/session":\n        return _handle_session_get(handler, parsed)\n')
+# A map action on another profile's session is scoped to that one request.
+edit("api/routes.py", '    """Handle all GET routes. Returns True if handled, False for 404."""\n',
+     '    """Handle all GET routes. Returns True if handled, False for 404."""\n'
+     '    if handler.headers.get("X-Horo-Profile"):\n'
+     '        from api.horo_overview import profile_override\n'
+     '        refused = profile_override(handler)\n'
+     '        if refused:\n'
+     '            return bad(handler, refused, 403)\n')
+edit("api/routes.py", '    """Handle all POST routes. Returns True if handled, False for 404."""\n',
+     '    """Handle all POST routes. Returns True if handled, False for 404."""\n'
+     '    if handler.headers.get("X-Horo-Profile"):\n'
+     '        from api.horo_overview import profile_override\n'
+     '        refused = profile_override(handler)\n'
+     '        if refused:\n'
+     '            arm_connection_close_if_body_pending(handler)\n'
+     '            return bad(handler, refused, 403)\n')
+edit("api/routes.py",
+     '        for row in get_cli_sessions(all_profiles=all_profiles):\n'
+     '            if row.get("session_id") == session_id:\n'
+     '                return row\n'
+     '        for source in _CLI_LOOKUP_FALLBACK_SOURCES:\n',
+     '        from api.horo_overview import cli_row\n'
+     '        row = cli_row(get_cli_sessions, session_id, all_profiles)\n'
+     '        if row:\n'
+     '            return row\n'
+     '        for source in _CLI_LOOKUP_FALLBACK_SOURCES:\n')
+# Opening a session of another profile waited for the sidebar, which the map
+# has just covered, to finish reloading: about 420 ms on real data.
+edit("static/sessions.js",
+     "    if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);\n"
+     "    if(typeof renderSessionList==='function') await renderSessionList();\n",
+     "    if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);\n"
+     "    if(typeof renderSessionList==='function') void renderSessionList();\n")
 edit("static/panels.js", "'kanban','workspaces','profiles','insights','logs','plugin'];",
      "'kanban','mindmap','workspaces','profiles','insights','logs','plugin'];")
 edit("static/panels.js", "  if (nextPanel === 'kanban') await loadKanban();\n",

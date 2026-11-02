@@ -20,7 +20,7 @@ CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, title TEXT, pa
 CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL,
   content TEXT, timestamp REAL NOT NULL);
 """
-stubs = {"profiles": [], "homes": {}, "live": []}
+stubs = {"profiles": [], "homes": {}, "live": [], "active": "default", "isolated": False, "bound": None, "set": None}
 
 
 def _install_stubs() -> None:
@@ -32,7 +32,13 @@ def _install_stubs() -> None:
     profiles = types.ModuleType("api.profiles")
     profiles.list_profiles_api = lambda: [{"name": n} for n in stubs["profiles"]]
     profiles.get_hermes_home_for_profile = lambda name: stubs["homes"][name]
-    sys.modules.update({"api": api, "api.helpers": helpers, "api.models": models, "api.profiles": profiles})
+    profiles.get_active_profile_name = lambda: stubs["active"]
+    profiles._is_isolated_profile_mode = lambda: stubs["isolated"]
+    profiles.set_request_profile = lambda name: stubs.update(set=name)
+    auth = types.ModuleType("api.auth")
+    auth._trusted_auth_bound_profile = lambda _handler: stubs["bound"]
+    sys.modules.update({"api": api, "api.auth": auth, "api.helpers": helpers, "api.models": models,
+                        "api.profiles": profiles})
 
 
 _install_stubs()
@@ -49,7 +55,8 @@ class Overview(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.now = time.time()
-        stubs.update(profiles=["default"], homes={"default": Path(self.tmp.name)}, live=[])
+        stubs.update(profiles=["default"], homes={"default": Path(self.tmp.name)}, live=[], active="default",
+                     isolated=False, bound=None, set=None)
         self.conn = sqlite3.connect(Path(self.tmp.name) / "state.db")
         self.addCleanup(self.conn.close)
         self.conn.executescript(SCHEMA)
@@ -151,6 +158,37 @@ class Overview(unittest.TestCase):
         stubs["homes"]["new"] = Path(self.tmp.name) / "missing"
         self.assertEqual(self.build()["errors"], [])
 
+    def test_pinned_stays_past_the_window(self):
+        self.add("old", ago=200 * 3600)
+        self.add("older", ago=200 * 3600)
+        stubs["live"] = [{"session_id": "old", "pinned": True}]
+        self.assertEqual(self.ids(), {"old"})
+
+    def test_fresh_fork_before_its_first_turn(self):
+        self.add("root")
+        stubs["live"] = [{"session_id": "fork", "profile": "default", "title": "分叉", "updated_at": self.now,
+                          "message_count": 2, "parent_session_id": "root"}]
+        got = self.build()
+        self.assertEqual({s["id"] for s in got["sessions"]}, {"root", "fork"})
+        self.assertEqual(got["links"], [{"from": "root", "to": "fork", "type": "fork"}])
+
+    def test_sidecar_only_excludes_what_is_not_a_human_webui_session(self):
+        row = {"profile": "default", "title": "x", "updated_at": self.now, "message_count": 2}
+        stubs["live"] = [
+            {**row, "session_id": "empty", "message_count": 0},
+            {**row, "session_id": "imported", "is_cli_session": True},
+            {**row, "session_id": "cron", "raw_source": "cron"},
+            {**row, "session_id": "stale", "updated_at": self.now - 100 * 3600},
+            {**row, "session_id": "stranger", "profile": "unlisted"},
+            {**row, "session_id": "gone", "archived": True},
+        ]
+        self.assertEqual(self.ids(), set())
+
+    def test_stream_id_is_exposed_to_stop_a_turn(self):
+        self.add("web", source="webui")
+        stubs["live"] = [{"session_id": "web", "is_streaming": True, "active_stream_id": "s1"}]
+        self.assertEqual(self.build()["sessions"][0]["stream_id"], "s1")
+
     def test_never_writes(self):
         self.add("one")
         self.conn.close()
@@ -158,6 +196,66 @@ class Overview(unittest.TestCase):
         before = path.read_bytes()
         self.build()
         self.assertEqual(path.read_bytes(), before)
+
+
+class CliRow(unittest.TestCase):
+    def setUp(self):
+        overview._cli_index.clear()
+        stubs.update(active="default")
+        self.calls = 0
+
+    def fetch(self, all_profiles):
+        self.calls += 1
+        return [{"session_id": "a", "n": self.calls}]
+
+    def test_three_lookups_scan_once(self):
+        for _ in range(3):
+            self.assertEqual(overview.cli_row(self.fetch, "a", False)["session_id"], "a")
+        self.assertEqual(self.calls, 1)
+
+    def test_a_miss_is_left_to_the_direct_lookup(self):
+        self.assertIsNone(overview.cli_row(self.fetch, "new", False))
+
+    def test_callers_cannot_change_the_index(self):
+        overview.cli_row(self.fetch, "a", False)["n"] = 99
+        self.assertEqual(overview.cli_row(self.fetch, "a", False)["n"], 1)
+
+    def test_scoped_by_profile_and_expires(self):
+        overview.cli_row(self.fetch, "a", False)
+        overview.cli_row(self.fetch, "a", True)
+        stubs.update(active="other")
+        overview.cli_row(self.fetch, "a", False)
+        self.assertEqual(self.calls, 3)
+        key = ("other", False)
+        overview._cli_index[key] = (0.0, overview._cli_index[key][1])
+        overview.cli_row(self.fetch, "a", False)
+        self.assertEqual(self.calls, 4)
+
+
+class ProfileOverride(unittest.TestCase):
+    def setUp(self):
+        stubs.update(profiles=["default", "other"], active="default", isolated=False, bound=None, set=None)
+
+    def override(self, name):
+        return overview.profile_override(types.SimpleNamespace(headers={overview.PROFILE_HEADER: name}))
+
+    def test_scopes_the_request(self):
+        self.assertIsNone(self.override("other"))
+        self.assertEqual(stubs["set"], "other")
+
+    def test_active_profile_needs_nothing(self):
+        self.assertIsNone(self.override("default"))
+        self.assertIsNone(stubs["set"])
+
+    def test_refusals_leave_the_profile_alone(self):
+        for state, name in (({}, "nobody"), ({}, "../etc"), ({"isolated": True}, "other"), ({"bound": "default"}, "other")):
+            stubs.update({"isolated": False, "bound": None, "set": None, **state})
+            self.assertTrue(self.override(name), (state, name))
+            self.assertIsNone(stubs["set"], (state, name))
+
+    def test_bound_profile_may_be_named(self):
+        stubs.update(bound="other")
+        self.assertIsNone(self.override("other"))
 
 
 if __name__ == "__main__":

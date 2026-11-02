@@ -6,6 +6,9 @@ that per click, so it reads this instead: read-only SQL on each profile's
 state.db, plus the in-process state only this server knows (live streams,
 pending approvals). Nothing here writes.
 
+The map acts on sessions of other profiles without switching the active one:
+``X-Horo-Profile`` scopes a single request, see ``profile_override``.
+
 A profile that cannot be read is reported in ``errors``, never silently dropped:
 an empty column must not look like an idle profile.
 """
@@ -14,13 +17,21 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from urllib.parse import quote
 
+from api.auth import _trusted_auth_bound_profile
 from api.helpers import _redact_text
 from api.models import all_sessions
-from api.profiles import get_hermes_home_for_profile, list_profiles_api
+from api.profiles import (
+    _is_isolated_profile_mode,
+    get_active_profile_name,
+    get_hermes_home_for_profile,
+    list_profiles_api,
+    set_request_profile,
+)
 
 # Sessions a person is part of. An allowlist: a source Hermes adds later stays
 # off the map until someone decides it belongs here.
@@ -33,13 +44,17 @@ EVENTS = 3
 # last_activity_at as it works, so a recent stamp on an open session means running.
 EXTERNAL_RUNNING_SECONDS = 120
 INTERRUPTED = {"startup_orphan_reap", "ws_orphan_reap"}
+PROFILE_HEADER = "X-Horo-Profile"
+CLI_INDEX_SECONDS = 5.0
+LIVE_FIELDS = ("is_streaming", "pinned", "archived", "title", "active_stream_id", "profile", "updated_at",
+               "message_count", "parent_session_id", "raw_source", "is_cli_session")
 
 _SESSIONS_SQL = """
 SELECT id, source, title, parent_session_id, end_reason, ended_at,
        COALESCE(last_activity_at, ended_at, started_at) AS activity,
        last_activity_description
 FROM sessions
-WHERE COALESCE(last_activity_at, ended_at, started_at) >= ?
+WHERE (COALESCE(last_activity_at, ended_at, started_at) >= ? OR id IN ({{pinned}}))
   AND source IN ({sources})
   AND message_count > 0
   AND COALESCE(end_reason, '') != 'compression'
@@ -57,6 +72,29 @@ WHERE session_id = ? AND role IN ('user', 'assistant') AND content IS NOT NULL A
 ORDER BY id DESC LIMIT ?
 """
 _PARENT_SQL = "SELECT end_reason FROM sessions WHERE id = ?"
+
+
+_cli_index: dict = {}
+_cli_index_lock = threading.Lock()
+
+
+def cli_row(fetch_rows, session_id: str, all_profiles: bool) -> dict | None:
+    """One session's row from upstream's list, without rebuilding the list per lookup.
+
+    Upstream scans every session of the profile to find one, and opening a
+    session looks it up three times in a row: about 100 ms each on 3,900 sessions.
+    Rows may be up to CLI_INDEX_SECONDS old; a session too new to be listed still
+    reaches upstream's direct lookup, which follows this call.
+    """
+    key = (get_active_profile_name(), all_profiles)
+    now = time.monotonic()
+    with _cli_index_lock:
+        at, index = _cli_index.get(key, (0.0, None))
+        if index is None or now - at > CLI_INDEX_SECONDS:
+            index = {row.get("session_id"): row for row in fetch_rows(all_profiles=all_profiles)}
+            _cli_index[key] = (now, index)
+    row = index.get(session_id)
+    return dict(row) if row else None
 
 
 def _text(raw: object, limit: int = TEXT_LIMIT) -> str:
@@ -106,7 +144,10 @@ def _read_profile(name: str, home: Path, cutoff: float, now: float, live: dict, 
     conn = sqlite3.connect(_db_uri(home), uri=True, timeout=1.0)
     conn.row_factory = sqlite3.Row
     try:
-        rows = conn.execute(_SESSIONS_SQL, (cutoff, *HUMAN_SOURCES, MAX_PER_PROFILE)).fetchall()
+        # Pinned sessions stay on the map however old they are.
+        pinned = [sid for sid, state in live.items() if state.get("pinned")]
+        sql = _SESSIONS_SQL.format(pinned=",".join("?" * len(pinned)))
+        rows = conn.execute(sql, (cutoff, *pinned, *HUMAN_SOURCES, MAX_PER_PROFILE)).fetchall()
         for row in rows:
             sid = row["id"]
             state = live.get(sid, {})
@@ -132,6 +173,7 @@ def _read_profile(name: str, home: Path, cutoff: float, now: float, live: dict, 
                            for m in reversed(recent)],
                 "pinned": bool(state.get("pinned")),
                 "read_only": row["source"] != "webui",
+                "stream_id": state.get("active_stream_id") or None,
             })
             parent = row["parent_session_id"]
             if parent:
@@ -150,8 +192,59 @@ def _live_state() -> dict:
     for row in all_sessions(include_lineage_metadata=False, sidebar_metadata_only=True):
         sid = row.get("session_id")
         if sid:
-            state[sid] = {key: row.get(key) for key in ("is_streaming", "pinned", "archived", "title")}
+            state[sid] = {key: row.get(key) for key in LIVE_FIELDS}
     return state
+
+
+def _sidecar_session(sid: str, state: dict, now: float, attention_of) -> dict:
+    """A WebUI session with no state.db row yet: a fresh fork, before its first turn."""
+    attention = attention_of(sid)
+    status = "waiting" if attention else "running" if state.get("is_streaming") else "done"
+    title = _text(state.get("title"), 120) or sid
+    return {
+        "id": sid, "profile": state.get("profile") or "default", "source": "webui", "title": title,
+        "status": status, "last_activity_at": state.get("updated_at") or now, "goal": title, "progress": "—",
+        "next": _next_step(status, attention, None), "events": [], "pinned": bool(state.get("pinned")),
+        "read_only": False, "stream_id": state.get("active_stream_id") or None,
+    }
+
+
+def _sidecar_only(known: set, profiles: list, cutoff: float, now: float, live: dict, attention_of) -> tuple[list, list]:
+    sessions, links = [], []
+    for sid, state in live.items():
+        if sid in known or state.get("archived") or state.get("is_cli_session") or not state.get("message_count"):
+            continue
+        if (state.get("profile") or "default") not in profiles:
+            continue
+        if (state.get("raw_source") or "webui") != "webui":
+            continue
+        if (state.get("updated_at") or 0) < cutoff and not state.get("pinned"):
+            continue
+        sessions.append(_sidecar_session(sid, state, now, attention_of))
+        if state.get("parent_session_id"):
+            links.append({"from": state["parent_session_id"], "to": sid, "type": "fork"})
+    return sessions, links
+
+
+def profile_override(handler) -> str | None:
+    """Scope this request to the ``X-Horo-Profile`` profile; return why not, if refused.
+
+    Runs in the route handlers, so after authentication. It grants nothing a
+    client cannot already do with /api/profile/switch, and refuses what that
+    route refuses: a profile bound to the login, or isolated single-profile mode.
+    """
+    name = handler.headers.get(PROFILE_HEADER, "").strip()
+    if name == get_active_profile_name():
+        return None
+    if _is_isolated_profile_mode():
+        return "Profiles are isolated on this server"
+    bound = _trusted_auth_bound_profile(handler)
+    if bound and name != bound:
+        return "Profile is bound to the current session"
+    if name not in {entry.get("name") for entry in list_profiles_api()}:
+        return "Unknown profile"
+    set_request_profile(name)
+    return None
 
 
 def build(attention_of, since: str = "") -> dict:
@@ -170,6 +263,9 @@ def build(attention_of, since: str = "") -> dict:
             continue
         sessions += found
         links += forks
+    extra, extra_links = _sidecar_only({s["id"] for s in sessions}, profiles, cutoff, now, live, attention_of)
+    sessions += extra
+    links += extra_links
     visible = {s["id"] for s in sessions}
     payload = {
         "window_hours": WINDOW_SECONDS // 3600,

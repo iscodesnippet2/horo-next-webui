@@ -154,14 +154,24 @@ with tempfile.TemporaryDirectory() as tmp:
             page.evaluate("switchPanel('mindmap')")
             page.wait_for_selector(".mm-card", timeout=15000)
             map_requests: list[str] = []
-            page.on("request", lambda req: map_requests.append(req.url))
+            on_map_request = lambda req: map_requests.append(req.url)
+            page.on("request", on_map_request)
             # Dispatched, not clicked: a fresh home sits behind the onboarding dialog.
             page.evaluate("document.querySelector('.mm-card').click()")
             page.wait_for_selector(".mm-detail", timeout=5000)
             mindmap = page.evaluate("""() => ({
               cards: [...document.querySelectorAll('.mm-card')].map(c => c.dataset.sid),
               chat: getComputedStyle(document.getElementById('mainChat')).display,
+              actions: document.querySelector('.mm-actions').innerText,
             })""")
+            page.remove_listener("request", on_map_request)
+            refused = page.evaluate("""() => fetch('api/horo/overview', {headers: {'X-Horo-Profile': 'nobody'}})
+              .then(r => r.status)""")
+            page.evaluate("_mmOpen(mm.data.sessions[0])")
+            page.wait_for_function("() => document.getElementById('mmBack') && !document.getElementById('mmBack').hidden",
+                                   timeout=15000)
+            page.evaluate("document.getElementById('mmBack').click()")
+            page.wait_for_function("() => _currentPanel === 'mindmap'", timeout=5000)
             browser.close()
         print(f"  libraries: mermaid {out['mermaidVersion'] or '?'}, pdf.js {out['pdfjsVersion'] or '?'}, "
               f"katex {out['katexVersion'] or '?'}")
@@ -174,6 +184,8 @@ with tempfile.TemporaryDirectory() as tmp:
         check(mindmap["cards"] == ["smoke-human"], "mind map shows only the session a person is in", str(mindmap["cards"]))
         check(mindmap["chat"] == "none", "mind map replaces the chat view")
         check(not map_requests, "selecting a card makes no request", ", ".join(map_requests[:3]))
+        check("開啟工作區" in mindmap["actions"], "mind map offers the workspace", mindmap["actions"])
+        check(refused == 403, "an unknown profile in X-Horo-Profile is refused", str(refused))
         check(not external, "no request leaves the machine", ", ".join(sorted(set(external))[:4]))
         check(not errors, "no uncaught page errors", " | ".join(errors[:3]))
     finally:

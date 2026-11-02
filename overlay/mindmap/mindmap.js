@@ -1,6 +1,7 @@
-// Agent mind map. Reads /api/horo/overview and nothing else: selecting a card
-// never loads a transcript or touches the active profile, so it stays instant
-// however large the sessions behind it are.
+// Agent mind map. Reads /api/horo/overview: selecting a card never loads a
+// transcript or touches the active profile, so it stays instant however large
+// the sessions behind it are. Actions are scoped per request by X-Horo-Profile;
+// only opening the workspace, which is upstream's chat view, switches profile.
 const MM_STATUS = {
   running: {label: '執行中', color: '#1d4ed8', bg: '#eff6ff'},
   waiting: {label: '等待你', color: '#b45309', bg: '#fffbeb'},
@@ -18,6 +19,7 @@ const mm = {
   data: null, version: '', mounted: false, active: false, source: null, poll: null, debounce: null, inFlight: false,
   selected: null, expanded: {}, hours: 72, filter: 'all', layout: 'radial', showLinks: false, centered: false,
   seen: {}, baseline: 0, cards: new Map(), cardKeys: new Map(),
+  replyOpen: false, replyText: '', busy: false,
 };
 
 function _mmLoadStore() {
@@ -256,6 +258,8 @@ function _mmDrawLinks(svg, canvas, anchors, tree) {
 
 function _mmDetail() {
   const box = $('mmDetail');
+  // A live refresh must not take the box away from someone typing in it.
+  if (document.activeElement && document.activeElement.id === 'mmReply' && box.contains(document.activeElement) && mm.replyOpen) return;
   const s = _mmSession(mm.selected);
   if (!s) {
     box.replaceChildren(_mmEl('div', 'mm-empty', '點選 session 查看摘要。'));
@@ -281,13 +285,142 @@ function _mmDetail() {
     list.append(_mmEl('dt', '', label), _mmEl('dd', '', value));
   });
   wrap.append(top, list);
+  if (s.read_only) {
+    wrap.append(_mmEl('span', 'mm-note', `這個 session 來自 ${s.source}，要繼續對話請開啟工作區。`));
+  }
   if (s.events.length) {
     const events = _mmEl('div', 'mm-events');
     events.append(_mmEl('strong', '', '最近事件'));
     s.events.forEach(e => events.append(_mmEl('span', '', `${e.role === 'user' ? '你' : 'agent'}：${e.text}`)));
     wrap.append(events);
   }
+  wrap.append(_mmActions(s));
+  if (mm.replyOpen) wrap.append(_mmReplyBox(s));
   box.replaceChildren(wrap);
+}
+
+function _mmButton(label, onClick, primary) {
+  const btn = _mmEl('button', `mm-btn${primary ? ' mm-primary' : ''}`, label);
+  btn.type = 'button';
+  btn.disabled = mm.busy;
+  btn.onclick = onClick;
+  return btn;
+}
+
+function _mmActions(s) {
+  const row = _mmEl('div', 'mm-actions');
+  if (!s.read_only) {
+    row.append(_mmButton('回覆', () => { mm.replyOpen = !mm.replyOpen; _mmDetail(); $('mmReply')?.focus(); }, true));
+  }
+  if (s.stream_id) row.append(_mmButton('停止', () => _mmStop(s)));
+  const open = _mmButton('開啟工作區', () => _mmOpen(s), s.read_only);
+  // Upstream indexes external sessions on first lookup; do that before the click lands.
+  if (s.read_only) open.onpointerenter = () => _mmWarm(s);
+  row.append(open);
+  row.append(_mmButton('分叉', () => _mmFork(s)));
+  if (!s.read_only) row.append(_mmButton(s.pinned ? '取消釘選' : '釘選', () => _mmPin(s)));
+  return row;
+}
+
+function _mmWarm(s) {
+  _mmRequest(s, `/api/session?session_id=${encodeURIComponent(s.id)}&messages=0&resolve_model=0`).catch(() => {});
+}
+
+function _mmReplyBox(s) {
+  const box = _mmEl('div', 'mm-reply');
+  const label = _mmEl('label', '', '回覆給這個 session');
+  label.htmlFor = 'mmReply';
+  const text = _mmEl('textarea');
+  text.id = 'mmReply';
+  text.rows = 3;
+  text.value = mm.replyText;
+  text.oninput = () => { mm.replyText = text.value; };
+  box.append(label, text, _mmButton('送出', () => _mmReply(s), true));
+  return box;
+}
+
+function _mmRequest(s, path, body) {
+  const headers = {'Content-Type': 'application/json', 'X-Horo-Profile': s.profile};
+  return api(path, body ? {method: 'POST', body: JSON.stringify(body), headers} : {headers});
+}
+
+// One action at a time; the outcome is on the map, so the map is what refreshes.
+async function _mmAct(failure, action) {
+  if (mm.busy) return;
+  mm.busy = true;
+  _mmDetail();
+  try {
+    await action();
+  } catch (e) {
+    showToast(`${failure}：${e.message || e}`, 4000);
+  } finally {
+    mm.busy = false;
+    await loadMindmap();
+    _mmDetail();
+  }
+}
+
+function _mmReply(s) {
+  const message = mm.replyText.trim();
+  if (!message) return;
+  return _mmAct('回覆失敗', async () => {
+    await _mmRequest(s, '/api/chat/start', {session_id: s.id, message, profile: s.profile, goal_continuation_id: ''});
+    mm.replyText = '';
+    mm.replyOpen = false;
+    showToast('已送出回覆');
+  });
+}
+
+function _mmStop(s) {
+  return _mmAct('停止失敗', () => _mmRequest(s, `/api/chat/cancel?stream_id=${encodeURIComponent(s.stream_id)}`));
+}
+
+function _mmPin(s) {
+  return _mmAct('釘選失敗', () => _mmRequest(s, '/api/session/pin', {session_id: s.id, pinned: !s.pinned}));
+}
+
+function _mmFork(s) {
+  return _mmAct('分叉失敗', async () => {
+    const data = await _mmRequest(s, '/api/session/branch', {session_id: s.id});
+    const id = data.session_id || (data.session && data.session.session_id);
+    if (!id) throw new Error('伺服器沒有回傳新 session');
+    mm.selected = id;
+    mm.seen[id] = Date.now() / 1000;
+    mm.replyOpen = true;
+    mm.replyText = '';
+    _mmSaveStore();
+    showToast('已分叉出新 session');
+  });
+}
+
+function _mmShowBack(show) {
+  let back = $('mmBack');
+  if (show && !back) {
+    back = _mmEl('button', 'mm-btn', '← 返回心智圖');
+    back.id = 'mmBack';
+    back.type = 'button';
+    back.onclick = () => switchPanel('mindmap');
+    document.body.append(back);
+  }
+  if (back) back.hidden = !show;
+}
+
+// The workspace is upstream's chat view, with its tool cards, approvals and
+// streaming. Leaving the panel's DOM in place is what makes the way back instant.
+async function _mmOpen(s) {
+  mm.seen[s.id] = s.last_activity_at;
+  _mmSaveStore();
+  await switchPanel('chat');
+  _mmShowBack(true);
+  try {
+    if (s.read_only) {
+      // Same as the sidebar: a failed import still opens read-only.
+      await _mmRequest(s, '/api/session/import_cli', {session_id: s.id}).catch(() => {});
+    }
+    await loadSession(s.id);
+  } catch (e) {
+    showToast(`無法開啟工作區：${e.message || e}`, 4000);
+  }
 }
 
 function _mmHeader() {
@@ -367,6 +500,7 @@ async function loadMindmap() {
 function _mmSelect(id) {
   const s = _mmSession(id);
   if (!s) return;
+  if (mm.selected !== id) { mm.replyOpen = false; mm.replyText = ''; }
   mm.selected = id;
   mm.seen[id] = s.last_activity_at;
   _mmSaveStore();
@@ -440,7 +574,11 @@ function _mmMount() {
     </div>`;
   root.addEventListener('click', e => {
     const card = e.target.closest('.mm-card');
-    if (card) return _mmSelect(card.dataset.sid);
+    if (card) {
+      _mmSelect(card.dataset.sid);
+      if (e.ctrlKey || e.metaKey) _mmOpen(_mmSession(card.dataset.sid));
+      return;
+    }
     const filter = e.target.closest('[data-mm-filter]');
     if (filter) { mm.filter = filter.dataset.mmFilter; return _mmRender(); }
     const layout = e.target.closest('[data-mm-layout]');
@@ -455,6 +593,7 @@ function _mmMount() {
 function showMindmap() {
   _mmMount();
   mm.active = true;
+  _mmShowBack(false);
   _mmStartLive();
   if (mm.data) _mmRender();
   return loadMindmap();
@@ -463,4 +602,12 @@ function showMindmap() {
 function hideMindmap() {
   mm.active = false;
   _mmStopLive();
+  _mmShowBack(false);
 }
+
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape' || !$('mmBack') || $('mmBack').hidden) return;
+  const target = document.activeElement;
+  if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+  switchPanel('mindmap');
+});
