@@ -185,6 +185,18 @@ with tempfile.TemporaryDirectory() as tmp:
             kept = page.evaluate("mm.selected === mm.data.sessions[0].id")
             page.keyboard.press("Escape")
             page.wait_for_function("() => document.getElementById('mmDetail').hidden", timeout=5000)
+            opened = "() => document.body.classList.contains('mm-modal') && !document.body.classList.contains('mm-loading')"
+            new_chat = []
+            for _ in range(2):
+                page.evaluate("document.querySelector('.mm-profile-pill')"
+                              ".dispatchEvent(new MouseEvent('dblclick', {bubbles: true}))")
+                page.wait_for_function(opened, timeout=15000)
+                new_chat.append(page.evaluate("""() => ({
+                  id: S.session.session_id, modal: mm.modal === S.session.session_id,
+                  profile: S.session.profile || 'default', empty: !S.messages.length,
+                })"""))
+                page.keyboard.press("Escape")
+                page.wait_for_function("() => !document.body.classList.contains('mm-modal')", timeout=5000)
             browser.close()
         print(f"  libraries: mermaid {out['mermaidVersion'] or '?'}, pdf.js {out['pdfjsVersion'] or '?'}, "
               f"katex {out['katexVersion'] or '?'}")
@@ -203,6 +215,10 @@ with tempfile.TemporaryDirectory() as tmp:
         check(modal == {"full": True, "session": True, "behind": True, "panel": "mindmap", "close": "關閉工作區"},
               "workspace opens full-screen over the map, with a close button", str(modal))
         check(kept, "Esc closes the workspace and keeps the card selected")
+        first = new_chat[0]
+        check(first["id"] != "smoke-human" and first["modal"] and first["profile"] == "default" and first["empty"],
+              "double-clicking a profile opens a new session in its workspace", str(first))
+        check(new_chat[1]["id"] == first["id"], "an unused new session is reused, not duplicated", str(new_chat))
         check(not external, "no request leaves the machine", ", ".join(sorted(set(external))[:4]))
         check(not errors, "no uncaught page errors", " | ".join(errors[:3]))
     finally:

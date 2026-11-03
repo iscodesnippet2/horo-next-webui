@@ -100,7 +100,11 @@ per-request override checked after authentication that refuses what
 lays upstream's chat view over the map as a full-screen workspace, which does
 switch the active profile; the close button or Esc comes back without repainting
 the map, and keeps the card selected. With a card selected, the arrow keys move
-the selection, Enter opens the workspace and Esc lets go.
+the selection, Enter opens the workspace and Esc lets go. Double-clicking a
+profile (or Enter on it) starts a session there with upstream's New Chat, in that
+profile's last workspace, and opens it as the workspace; an empty one the map
+started before is reused. Its card appears once it has a message, and is
+selected when the workspace closes.
 
 A card's goal is the session's title, which a person can edit; edits live in
 `horo_goals.json` in the WebUI state directory, so `state.db` stays read-only and

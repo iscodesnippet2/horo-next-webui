@@ -24,7 +24,7 @@ const mm = {
   data: null, version: '', mounted: false, active: false, source: null, poll: null, debounce: null, inFlight: false,
   selected: null, order: [], expanded: {}, hours: 72, filter: 'all', layout: 'tree', showLinks: false, centered: false,
   seen: {}, baseline: 0, cards: new Map(), cardKeys: new Map(),
-  goalOpen: false, busy: false, modal: null,
+  goalOpen: false, busy: false, modal: null, drafts: {},
 };
 
 function _mmLoadStore() {
@@ -236,6 +236,16 @@ function _mmProfileNode(g) {
   node.style.zIndex = '2';
   const pill = _mmEl('div', 'mm-profile-pill', g.name);
   pill.append(_mmEl('small', '', `hermes · ${g.name} · ${g.active} 執行中`));
+  pill.tabIndex = 0;
+  pill.setAttribute('role', 'button');
+  pill.setAttribute('aria-label', `在 ${g.name} 開新會話`);
+  pill.title = '雙擊開新會話';
+  pill.ondblclick = () => _mmNewSession(g.name);
+  pill.onkeydown = e => {
+    if (e.key !== 'Enter' || e.isComposing) return;
+    e.preventDefault();
+    _mmNewSession(g.name);
+  };
   node.append(pill);
   if (g.olderCount) {
     const open = !!mm.expanded[g.name];
@@ -411,6 +421,20 @@ function _mmModalBar(s) {
   $('mmModalBar').replaceChildren(dot, heading, badge, close);
 }
 
+// Up at once, content hidden until the session it belongs to has loaded.
+function _mmOpenBar(s) {
+  let bar = $('mmModalBar');
+  if (!bar) {
+    bar = _mmEl('div');
+    bar.id = 'mmModalBar';
+    document.body.append(bar);
+  }
+  _mmModalBar(s);
+  document.body.classList.add('mm-loading');
+  _mmSetModal(true);
+  $('mmModalClose').focus();
+}
+
 function _mmSetModal(open) {
   document.body.classList.toggle('mm-modal', open);
   // Everything behind the modal stays alive but out of reach, Tab included.
@@ -427,16 +451,7 @@ async function _mmOpen(s) {
   mm.seen[s.id] = s.last_activity_at;
   mm.modal = s.id;
   _mmSaveStore();
-  let bar = $('mmModalBar');
-  if (!bar) {
-    bar = _mmEl('div');
-    bar.id = 'mmModalBar';
-    document.body.append(bar);
-  }
-  _mmModalBar(s);
-  document.body.classList.add('mm-loading');
-  _mmSetModal(true);
-  $('mmModalClose').focus();
+  _mmOpenBar(s);
   try {
     if (s.read_only) {
       // Same as the sidebar: a failed import still opens read-only.
@@ -452,6 +467,57 @@ async function _mmOpen(s) {
   }
 }
 
+// A new session in a profile, opened straight in the workspace. Its card turns
+// up once state.db has it, after the first message. An empty one the map made
+// before is reused, as upstream's New Chat does, so double-clicks add no clutter.
+async function _mmNewSession(profile) {
+  if (mm.modal) return;
+  const draft = {id: '', profile, status: 'idle', goal: '新會話', last_activity_at: Date.now() / 1000};
+  // Not a session id yet: nothing on the map answers to it.
+  const pending = mm.modal = `new:${profile}`;
+  _mmOpenBar(draft);
+  try {
+    await _switchProfileForSessionLoad(profile);
+    if (S.activeProfile !== profile) throw new Error(`無法切換到 ${profile}`);
+    const reused = await _mmReuseDraft(profile);
+    if (!reused) {
+      // The profile's own workspace, not that of whatever session was open last.
+      S._profileSwitchWorkspace = null;
+      const {last} = await api('/api/workspaces');
+      const options = {worktree: false};
+      if (last) options.workspace = last;
+      // A project filter left in the sidebar must not file the session under it.
+      if (_activeProject) options.project_id = null;
+      await newSession(false, options);
+    }
+    if (!S.session || (S.session.profile || 'default') !== profile) throw new Error('新會話不在這個 profile');
+    mm.drafts[profile] = S.session.session_id;
+    // Closed while it loaded: the session stays, the workspace does not reopen.
+    if (mm.modal !== pending) return;
+    mm.modal = S.session.session_id;
+    document.body.classList.remove('mm-loading');
+    $('msg')?.focus();
+  } catch (e) {
+    if (mm.modal === pending) _mmCloseModal();
+    showToast(`無法開新會話：${e.message || e}`, 4000);
+  }
+}
+
+async function _mmReuseDraft(profile) {
+  const sid = mm.drafts[profile];
+  if (!sid) return false;
+  if (S.session && S.session.session_id === sid) return _currentSessionIsReusableEmptyChat();
+  try {
+    const {session} = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+    if (!_isRestorableNewChatDraftSession(session)) throw new Error('used');
+    await loadSession(sid, {skipLineageResolve: true});
+    return !!(S.session && S.session.session_id === sid);
+  } catch (_e) {
+    delete mm.drafts[profile];
+    return false;
+  }
+}
+
 function _mmCloseModal() {
   if (!mm.modal) return;
   const id = mm.modal;
@@ -459,7 +525,12 @@ function _mmCloseModal() {
   document.body.classList.remove('mm-loading');
   _mmSetModal(false);
   document.querySelector(`.mm-card[data-sid="${CSS.escape(id)}"]`)?.focus({preventScroll: true});
-  loadMindmap();
+  // The session just left is the one selected; a new session's card arrives with this refresh.
+  loadMindmap().then(() => {
+    if (mm.selected === id || mm.modal || !_mmSession(id)) return;
+    _mmSelect(id);
+    _mmCardEl(id)?.focus({preventScroll: true});
+  });
 }
 
 function _mmHeader() {

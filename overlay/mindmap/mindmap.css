@@ -36,6 +36,9 @@ main.main.showing-mindmap > #mainChat{display:none !important;}
 .mm-profile{display:flex;flex-direction:column;align-items:center;gap:6px;}
 .mm-profile-pill{display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px 14px;min-width:132px;background:var(--bg);border:2px solid var(--text);border-radius:999px;font-size:15px;font-weight:700;}
 .mm-profile-pill small{font-size:11px;font-weight:400;color:var(--muted);}
+.mm-profile-pill{cursor:pointer;user-select:none;}
+.mm-profile-pill:hover{border-color:var(--accent,#2563eb);}
+.mm-profile-pill:focus-visible{outline:3px solid var(--text);outline-offset:2px;}
 .mm-done-toggle{min-height:28px;padding:0 10px;border:1px dashed var(--muted);border-radius:999px;background:transparent;color:var(--text);font:inherit;font-size:12px;cursor:pointer;}
 .mm-card{width:480px;box-sizing:border-box;display:flex;gap:8px;align-items:flex-start;padding:8px 10px;border:2px solid;border-radius:10px;text-align:left;color:#0f172a;font:inherit;cursor:pointer;}
 .mm-card:focus-visible,.mm-pill:focus-visible,.mm-btn:focus-visible,.mm-done-toggle:focus-visible{outline:3px solid var(--text);outline-offset:2px;}
