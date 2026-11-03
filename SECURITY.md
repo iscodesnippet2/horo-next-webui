@@ -2,15 +2,15 @@
 
 horo-next-webui is an unofficial PyPI distribution of
 [Hermes WebUI](https://github.com/nesquena/hermes-webui). It repackages upstream
-releases. It changes packaging, the launcher and two outbound defaults; it does
-not change what the product does.
+releases. It changes packaging, the launcher and two outbound defaults, and adds
+the agent mind map; otherwise it does not change what the product does.
 
 ## Reporting a vulnerability
 
 - **In Hermes WebUI's own code**: report it to
   [upstream](https://github.com/nesquena/hermes-webui/security). A fix reaches
   horo-next-webui with the next upstream release built here.
-- **In horo-next-webui's packaging** (the overlay, the wheel's contents, the
+- **In horo-next-webui's packaging or the mind map** (the overlay, the wheel's contents, the
   release workflow, a dependency version chosen here): open a private advisory
   at <https://github.com/iscodesnippet2/horo-next-webui/security/advisories/new>.
 

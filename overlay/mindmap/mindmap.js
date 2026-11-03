@@ -1,25 +1,30 @@
 // Agent mind map. Reads /api/horo/overview: selecting a card never loads a
 // transcript or touches the active profile, so it stays instant however large
-// the sessions behind it are. Actions are scoped per request by X-Horo-Profile;
-// only opening the workspace, which is upstream's chat view, switches profile.
+// the sessions behind it are. Requests for another profile are scoped by
+// X-Horo-Profile; only opening the workspace, upstream's chat view in a modal,
+// switches profile.
 const MM_STATUS = {
   running: {label: '執行中', color: '#1d4ed8', bg: '#eff6ff'},
   waiting: {label: '等待你', color: '#b45309', bg: '#fffbeb'},
   failed: {label: '失敗', color: '#6d28d9', bg: '#f5f3ff'},
   paused: {label: '已暫停', color: '#475569', bg: '#f1f5f9'},
-  done: {label: '已完成', color: '#64748b', bg: '#f8fafc'},
+  // Not running, not waiting: says nothing about whether the work succeeded.
+  idle: {label: '', color: '#64748b', bg: '#f8fafc'},
 };
 const MM_STORE_KEY = 'horo-mindmap-v1';
 const MM_POLL_MS = 15000; // Sessions outside this server emit no event.
 const MM_CARD = {w: 480, gap: 14};
 const MM_TREE = {center: 56, profile: 210, session: 570, width: 830};
 const MM_RADIAL = {center: 940, profile: 240, session: 620, width: 1880};
+const MM_CLOSE_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+const MM_PENCIL_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
+const MM_BEHIND_MODAL = ['.rail', '.sidebar', '.app-titlebar', '.rightpanel', '#mainMindmap'];
 
 const mm = {
   data: null, version: '', mounted: false, active: false, source: null, poll: null, debounce: null, inFlight: false,
-  selected: null, expanded: {}, hours: 72, filter: 'all', layout: 'radial', showLinks: false, centered: false,
+  selected: null, order: [], expanded: {}, hours: 72, filter: 'all', layout: 'tree', showLinks: false, centered: false,
   seen: {}, baseline: 0, cards: new Map(), cardKeys: new Map(),
-  replyOpen: false, replyText: '', busy: false,
+  goalOpen: false, busy: false, modal: null,
 };
 
 function _mmLoadStore() {
@@ -62,10 +67,20 @@ function _mmChanged(s) {
 
 function _mmBlocked(s) { return s.status === 'waiting' || s.status === 'failed'; }
 
+// The time range decides what is shown; what is live, pinned or selected always is.
+function _mmInRange(s) {
+  return s.pinned || s.status === 'running' || s.status === 'waiting' || s.id === mm.selected
+    || (Date.now() / 1000 - s.last_activity_at) <= mm.hours * 3600;
+}
+
 function _mmFaded(s) {
-  const inTime = s.pinned || (Date.now() / 1000 - s.last_activity_at) <= mm.hours * 3600;
   const match = mm.filter === 'all' || (mm.filter === 'need' && _mmBlocked(s)) || (mm.filter === 'changed' && _mmChanged(s));
-  return !inTime || !match;
+  return !_mmInRange(s) || !match;
+}
+
+function _mmWhen(s, prefix) {
+  const label = MM_STATUS[s.status].label;
+  return `${label ? `${label} · ` : ''}${prefix}${_mmAgo(s.last_activity_at)}`;
 }
 
 function _mmSession(id) {
@@ -73,14 +88,12 @@ function _mmSession(id) {
 }
 
 function _mmSummaryRows(parent, s) {
-  const blocked = _mmBlocked(s);
-  const color = blocked ? MM_STATUS[s.status].color : '';
-  [['目標', s.goal], ['做到哪', s.progress], [blocked ? '卡點' : '下一步', s.next]].forEach(([label, value], i) => {
-    const head = _mmEl('span', '', label);
-    const body = _mmEl('span', i === 2 && blocked ? 'mm-blocked' : '', value);
-    if (i === 2 && blocked) { head.style.color = color; body.style.color = color; }
-    parent.append(head, body);
-  });
+  parent.append(_mmEl('span', '', '進度'), _mmEl('span', '', s.progress));
+  if (!s.blocker) return;
+  const head = _mmEl('span', '', '卡點');
+  const body = _mmEl('span', 'mm-blocked', s.blocker);
+  head.style.color = body.style.color = MM_STATUS[s.status].color;
+  parent.append(head, body);
 }
 
 function _mmCard(s) {
@@ -92,13 +105,13 @@ function _mmCard(s) {
   card.style.borderColor = meta.color;
   card.style.background = meta.bg;
   const changed = _mmChanged(s);
-  card.setAttribute('aria-label', `${s.title}，${meta.label}${changed ? '，有新變化' : ''}`);
+  card.setAttribute('aria-label', `${s.goal}，${_mmWhen(s, '')}${changed ? '，有新變化' : ''}`);
   const dot = _mmEl('span', 'mm-dot');
   dot.style.background = meta.color;
   dot.setAttribute('aria-hidden', 'true');
   const body = _mmEl('span', 'mm-card-body');
-  const title = _mmEl('span', 'mm-card-title', `${s.pinned ? '◆ ' : ''}${s.title}`);
-  const line = _mmEl('span', 'mm-card-meta', `${meta.label} · ${_mmAgo(s.last_activity_at)}`);
+  const title = _mmEl('span', 'mm-card-title', `${s.pinned ? '◆ ' : ''}${s.goal}`);
+  const line = _mmEl('span', 'mm-card-meta', _mmWhen(s, ''));
   line.style.color = meta.color;
   const sum = _mmEl('span', 'mm-card-sum');
   _mmSummaryRows(sum, s);
@@ -208,6 +221,8 @@ function _mmLayout(groups) {
       y += g.height + 30;
     });
   });
+  // Arrow keys walk the cards in the order they are drawn: down each column.
+  mm.order = columns.flat().flatMap(g => g.visible.map(s => s.id));
   if (mm.showLinks) _mmDrawLinks(svg, canvas, anchors, tree);
   if (!mm.centered) {
     const view = $('mmMap');
@@ -220,11 +235,11 @@ function _mmProfileNode(g) {
   const node = _mmEl('div', 'mm-node mm-profile mm-profile-node');
   node.style.zIndex = '2';
   const pill = _mmEl('div', 'mm-profile-pill', g.name);
-  pill.append(_mmEl('small', '', `hermes · ${g.name} · ${g.active} 進行中`));
+  pill.append(_mmEl('small', '', `hermes · ${g.name} · ${g.active} 執行中`));
   node.append(pill);
-  if (g.doneCount) {
+  if (g.olderCount) {
     const open = !!mm.expanded[g.name];
-    const toggle = _mmEl('button', 'mm-done-toggle', open ? '收合已完成' : `+${g.doneCount} 個已完成`);
+    const toggle = _mmEl('button', 'mm-done-toggle', open ? '收合較早的' : `+${g.olderCount} 個較早的`);
     toggle.type = 'button';
     toggle.setAttribute('aria-expanded', String(open));
     toggle.onclick = () => { mm.expanded[g.name] = !open; _mmRender(); };
@@ -258,44 +273,54 @@ function _mmDrawLinks(svg, canvas, anchors, tree) {
 
 function _mmDetail() {
   const box = $('mmDetail');
-  // A live refresh must not take the box away from someone typing in it.
-  if (document.activeElement && document.activeElement.id === 'mmReply' && box.contains(document.activeElement) && mm.replyOpen) return;
+  // A live refresh must not take the box away from someone typing in it;
+  // choosing another card, or none, still does.
+  const typing = document.activeElement && document.activeElement.id === 'mmGoal';
+  if (typing && box.dataset.sid === mm.selected) return;
   const s = _mmSession(mm.selected);
+  box.dataset.sid = s ? s.id : '';
+  box.hidden = !s;
   if (!s) {
-    box.replaceChildren(_mmEl('div', 'mm-empty', '點選 session 查看摘要。'));
+    box.replaceChildren();
     return;
   }
   const meta = MM_STATUS[s.status];
   const wrap = _mmEl('div', 'mm-detail');
   const top = _mmEl('div', 'mm-detail-top');
   const heading = _mmEl('div');
-  const badge = _mmEl('span', 'mm-badge', `${meta.label} · 最後活動 ${_mmAgo(s.last_activity_at)}`);
+  const badge = _mmEl('span', 'mm-badge', _mmWhen(s, '最後活動 '));
   badge.style.color = meta.color;
   badge.style.background = meta.bg;
-  heading.append(_mmEl('span', 'mm-sub', `hermes · ${s.profile} · ${s.source}`),
-    _mmEl('h2', '', `${s.pinned ? '◆ ' : ''}${s.title}`), badge);
-  const close = _mmEl('button', 'mm-btn mm-close', '×');
+  const title = _mmEl('h2', '', `${s.pinned ? '◆ ' : ''}${s.goal} `);
+  const edit = _mmEl('button', 'mm-goal-edit');
+  edit.type = 'button';
+  edit.setAttribute('aria-label', '編輯目標');
+  edit.setAttribute('aria-expanded', String(mm.goalOpen));
+  edit.title = '編輯目標';
+  edit.innerHTML = MM_PENCIL_ICON;
+  edit.onclick = () => { mm.goalOpen = !mm.goalOpen; _mmDetail(); $('mmGoal')?.select(); };
+  title.append(edit);
+  heading.append(_mmEl('span', 'mm-sub', `hermes · ${s.profile} · ${s.source}`), badge, title);
+  const close = _mmEl('button', 'mm-btn mm-close');
   close.type = 'button';
-  close.setAttribute('aria-label', '關閉');
-  close.onclick = () => { mm.selected = null; _mmRender(); };
+  close.setAttribute('aria-label', '取消選取');
+  close.innerHTML = MM_CLOSE_ICON;
+  close.onclick = _mmDeselect;
   top.append(heading, close);
   const list = _mmEl('dl');
-  const blocked = _mmBlocked(s);
-  [['目標', s.goal], ['做到哪', s.progress], [blocked ? '卡點' : '下一步', s.next]].forEach(([label, value]) => {
-    list.append(_mmEl('dt', '', label), _mmEl('dd', '', value));
-  });
-  wrap.append(top, list);
-  if (s.read_only) {
-    wrap.append(_mmEl('span', 'mm-note', `這個 session 來自 ${s.source}，要繼續對話請開啟工作區。`));
-  }
+  const progress = _mmEl('dd');
+  progress.append(_mmProgressLink(s));
+  list.append(_mmEl('dt', '', '進度'), progress);
+  if (s.blocker) list.append(_mmEl('dt', '', '卡點'), _mmEl('dd', '', s.blocker));
+  wrap.append(top);
+  if (mm.goalOpen) wrap.append(_mmGoalBox(s));
+  wrap.append(list);
   if (s.events.length) {
     const events = _mmEl('div', 'mm-events');
     events.append(_mmEl('strong', '', '最近事件'));
     s.events.forEach(e => events.append(_mmEl('span', '', `${e.role === 'user' ? '你' : 'agent'}：${e.text}`)));
     wrap.append(events);
   }
-  wrap.append(_mmActions(s));
-  if (mm.replyOpen) wrap.append(_mmReplyBox(s));
   box.replaceChildren(wrap);
 }
 
@@ -307,36 +332,43 @@ function _mmButton(label, onClick, primary) {
   return btn;
 }
 
-function _mmActions(s) {
-  const row = _mmEl('div', 'mm-actions');
-  if (!s.read_only) {
-    row.append(_mmButton('回覆', () => { mm.replyOpen = !mm.replyOpen; _mmDetail(); $('mmReply')?.focus(); }, true));
-  }
-  if (s.stream_id) row.append(_mmButton('停止', () => _mmStop(s)));
-  const open = _mmButton('開啟工作區', () => _mmOpen(s), s.read_only);
+// The progress line is the way into the workspace, for every source alike.
+function _mmProgressLink(s) {
+  const link = _mmEl('button', 'mm-progress-link', s.progress);
+  link.type = 'button';
+  link.title = '開啟工作區';
+  link.setAttribute('aria-label', `開啟工作區：${s.progress}`);
+  link.onclick = () => _mmOpen(s);
   // Upstream indexes external sessions on first lookup; do that before the click lands.
-  if (s.read_only) open.onpointerenter = () => _mmWarm(s);
-  row.append(open);
-  row.append(_mmButton('分叉', () => _mmFork(s)));
-  if (!s.read_only) row.append(_mmButton(s.pinned ? '取消釘選' : '釘選', () => _mmPin(s)));
-  return row;
+  if (s.read_only) link.onpointerenter = () => _mmWarm(s);
+  return link;
 }
 
 function _mmWarm(s) {
   _mmRequest(s, `/api/session?session_id=${encodeURIComponent(s.id)}&messages=0&resolve_model=0`).catch(() => {});
 }
 
-function _mmReplyBox(s) {
-  const box = _mmEl('div', 'mm-reply');
-  const label = _mmEl('label', '', '回覆給這個 session');
-  label.htmlFor = 'mmReply';
-  const text = _mmEl('textarea');
-  text.id = 'mmReply';
-  text.rows = 3;
-  text.value = mm.replyText;
-  text.oninput = () => { mm.replyText = text.value; };
-  box.append(label, text, _mmButton('送出', () => _mmReply(s), true));
+function _mmGoalBox(s) {
+  const box = _mmEl('div', 'mm-goal-form');
+  const label = _mmEl('label', '', '目標（清空會回到 session 標題）');
+  label.htmlFor = 'mmGoal';
+  const input = _mmEl('input');
+  input.id = 'mmGoal';
+  input.type = 'text';
+  input.maxLength = 120;
+  input.value = s.goal;
+  input.onkeydown = e => { if (e.key === 'Enter') _mmSaveGoal(s, input.value); };
+  box.append(label, input, _mmButton('儲存', () => _mmSaveGoal(s, input.value), true));
   return box;
+}
+
+function _mmSaveGoal(s, value) {
+  return _mmAct('儲存目標失敗', async () => {
+    // Unchanged text stays out of the store, so a later retitle still shows.
+    const goal = value.trim() === s.title ? '' : value;
+    await _mmRequest(s, '/api/horo/goal', {session_id: s.id, goal});
+    mm.goalOpen = false;
+  });
 }
 
 function _mmRequest(s, path, body) {
@@ -360,67 +392,74 @@ async function _mmAct(failure, action) {
   }
 }
 
-function _mmReply(s) {
-  const message = mm.replyText.trim();
-  if (!message) return;
-  return _mmAct('回覆失敗', async () => {
-    await _mmRequest(s, '/api/chat/start', {session_id: s.id, message, profile: s.profile, goal_continuation_id: ''});
-    mm.replyText = '';
-    mm.replyOpen = false;
-    showToast('已送出回覆');
+function _mmModalBar(s) {
+  const meta = MM_STATUS[s.status];
+  const dot = _mmEl('span', 'mm-dot');
+  dot.style.background = meta.color;
+  dot.setAttribute('aria-hidden', 'true');
+  const heading = _mmEl('div', 'mm-modal-heading');
+  heading.append(_mmEl('span', 'mm-sub', `hermes · ${s.profile} · 工作區`), _mmEl('strong', '', s.goal));
+  const badge = _mmEl('span', 'mm-badge', _mmWhen(s, ''));
+  badge.style.color = meta.color;
+  badge.style.background = meta.bg;
+  const close = _mmEl('button', 'mm-btn mm-close');
+  close.id = 'mmModalClose';
+  close.type = 'button';
+  close.setAttribute('aria-label', '關閉工作區');
+  close.innerHTML = MM_CLOSE_ICON;
+  close.onclick = _mmCloseModal;
+  $('mmModalBar').replaceChildren(dot, heading, badge, close);
+}
+
+function _mmSetModal(open) {
+  document.body.classList.toggle('mm-modal', open);
+  // Everything behind the modal stays alive but out of reach, Tab included.
+  MM_BEHIND_MODAL.forEach(selector => {
+    const el = document.querySelector(selector);
+    if (el) el.inert = open;
   });
 }
 
-function _mmStop(s) {
-  return _mmAct('停止失敗', () => _mmRequest(s, `/api/chat/cancel?stream_id=${encodeURIComponent(s.stream_id)}`));
-}
-
-function _mmPin(s) {
-  return _mmAct('釘選失敗', () => _mmRequest(s, '/api/session/pin', {session_id: s.id, pinned: !s.pinned}));
-}
-
-function _mmFork(s) {
-  return _mmAct('分叉失敗', async () => {
-    const data = await _mmRequest(s, '/api/session/branch', {session_id: s.id});
-    const id = data.session_id || (data.session && data.session.session_id);
-    if (!id) throw new Error('伺服器沒有回傳新 session');
-    mm.selected = id;
-    mm.seen[id] = Date.now() / 1000;
-    mm.replyOpen = true;
-    mm.replyText = '';
-    _mmSaveStore();
-    showToast('已分叉出新 session');
-  });
-}
-
-function _mmShowBack(show) {
-  let back = $('mmBack');
-  if (show && !back) {
-    back = _mmEl('button', 'mm-btn', '← 返回心智圖');
-    back.id = 'mmBack';
-    back.type = 'button';
-    back.onclick = () => switchPanel('mindmap');
-    document.body.append(back);
-  }
-  if (back) back.hidden = !show;
-}
-
-// The workspace is upstream's chat view, with its tool cards, approvals and
-// streaming. Leaving the panel's DOM in place is what makes the way back instant.
+// The workspace is upstream's chat view laid over the map, with its tool cards,
+// approvals and streaming. The map keeps its DOM and scroll position underneath,
+// so closing repaints nothing. Upstream's panel stays 'mindmap' throughout.
 async function _mmOpen(s) {
   mm.seen[s.id] = s.last_activity_at;
+  mm.modal = s.id;
   _mmSaveStore();
-  await switchPanel('chat');
-  _mmShowBack(true);
+  let bar = $('mmModalBar');
+  if (!bar) {
+    bar = _mmEl('div');
+    bar.id = 'mmModalBar';
+    document.body.append(bar);
+  }
+  _mmModalBar(s);
+  document.body.classList.add('mm-loading');
+  _mmSetModal(true);
+  $('mmModalClose').focus();
   try {
     if (s.read_only) {
       // Same as the sidebar: a failed import still opens read-only.
       await _mmRequest(s, '/api/session/import_cli', {session_id: s.id}).catch(() => {});
     }
     await loadSession(s.id);
+    // The composer must never sit under another session's title.
+    if (!S.session || S.session.session_id !== s.id) throw new Error('載入的不是這個 session');
+    document.body.classList.remove('mm-loading');
   } catch (e) {
+    if (mm.modal === s.id) _mmCloseModal();
     showToast(`無法開啟工作區：${e.message || e}`, 4000);
   }
+}
+
+function _mmCloseModal() {
+  if (!mm.modal) return;
+  const id = mm.modal;
+  mm.modal = null;
+  document.body.classList.remove('mm-loading');
+  _mmSetModal(false);
+  document.querySelector(`.mm-card[data-sid="${CSS.escape(id)}"]`)?.focus({preventScroll: true});
+  loadMindmap();
 }
 
 function _mmHeader() {
@@ -436,11 +475,10 @@ function _mmHeader() {
   document.querySelectorAll('[data-mm-layout]').forEach(btn => {
     btn.setAttribute('aria-pressed', String(mm.layout === btn.dataset.mmLayout));
   });
-  const links = $('mmLinks');
-  links.textContent = `分叉線：${mm.showLinks ? '顯示' : '隱藏'}`;
-  links.setAttribute('aria-pressed', String(mm.showLinks));
-  $('mmHoursLabel').textContent = mm.hours;
-  $('mmMeHours').textContent = `近 ${mm.hours} 小時`;
+  document.querySelectorAll('[data-mm-hours]').forEach(btn => {
+    btn.setAttribute('aria-pressed', String(mm.hours === Number(btn.dataset.mmHours)));
+  });
+  $('mmMeHours').textContent = `近 ${mm.hours % 24 ? `${mm.hours} 小時` : `${mm.hours / 24} 天`}`;
 }
 
 function _mmGroups() {
@@ -448,11 +486,11 @@ function _mmGroups() {
   return mm.data.profiles
     .map(name => {
       const all = sessions.filter(s => s.profile === name);
-      const done = all.filter(s => s.status === 'done');
+      const older = all.filter(s => !_mmInRange(s));
       const open = !!mm.expanded[name];
       return {
-        name, doneCount: done.length, active: all.length - done.length,
-        visible: all.filter(s => s.status !== 'done' || open || s.id === mm.selected),
+        name, olderCount: older.length, active: all.filter(s => s.status === 'running').length,
+        visible: all.filter(s => open || _mmInRange(s)),
         total: all.length,
       };
     })
@@ -473,6 +511,8 @@ function _mmRender() {
   _mmLayout(groups);
   _mmHeader();
   _mmDetail();
+  const open = mm.modal && _mmSession(mm.modal);
+  if (open) _mmModalBar(open);
 }
 
 async function loadMindmap() {
@@ -500,17 +540,32 @@ async function loadMindmap() {
 function _mmSelect(id) {
   const s = _mmSession(id);
   if (!s) return;
-  if (mm.selected !== id) { mm.replyOpen = false; mm.replyText = ''; }
+  if (mm.selected !== id) mm.goalOpen = false;
   mm.selected = id;
   mm.seen[id] = s.last_activity_at;
   _mmSaveStore();
   _mmRender();
 }
 
-function _mmMarkAllRead() {
-  (mm.data ? mm.data.sessions : []).forEach(s => { mm.seen[s.id] = s.last_activity_at; });
-  _mmSaveStore();
+function _mmDeselect() {
+  if (!mm.selected) return;
+  mm.selected = null;
+  mm.goalOpen = false;
   _mmRender();
+}
+
+function _mmCardEl(id) {
+  return document.querySelector(`.mm-card[data-sid="${CSS.escape(id)}"]`);
+}
+
+function _mmStep(by) {
+  const at = mm.order.indexOf(mm.selected);
+  const next = mm.order[Math.min(Math.max(at < 0 ? 0 : at + by, 0), mm.order.length - 1)];
+  if (!next || next === mm.selected) return;
+  _mmSelect(next);
+  const card = _mmCardEl(next);
+  card?.focus({preventScroll: true});
+  card?.scrollIntoView({block: 'nearest', inline: 'nearest'});
 }
 
 function _mmScheduleRefresh() {
@@ -543,31 +598,31 @@ function _mmMount() {
       <div class="mm-title"><h1>Agent 心智圖</h1><span>上次查看後有 <strong id="mmChangedCount">0</strong> 個節點變化</span></div>
       <div class="mm-group" role="group" aria-label="版面">
         <button type="button" class="mm-pill" data-mm-layout="radial">放射</button>
-        <button type="button" class="mm-pill" data-mm-layout="tree">樹狀 →</button>
+        <button type="button" class="mm-pill" data-mm-layout="tree">樹狀</button>
       </div>
-      <button type="button" class="mm-pill" id="mmLinks"></button>
       <div class="mm-group" role="group" aria-label="過濾">
         <button type="button" class="mm-pill" data-mm-filter="all"></button>
         <button type="button" class="mm-pill" data-mm-filter="need"></button>
         <button type="button" class="mm-pill" data-mm-filter="changed"></button>
       </div>
-      <button type="button" class="mm-btn" id="mmReadAll">全部標為已讀</button>
+      <div class="mm-group mm-hours" role="group" aria-label="時間範圍：較早有活動的 session 會變淡">
+        <button type="button" class="mm-pill" data-mm-hours="168">7 天</button>
+        <button type="button" class="mm-pill" data-mm-hours="72">3 天</button>
+        <button type="button" class="mm-pill" data-mm-hours="48">2 天</button>
+        <button type="button" class="mm-pill" data-mm-hours="24">1 天</button>
+        <button type="button" class="mm-pill" data-mm-hours="6">6 小時</button>
+      </div>
     </header>
     <div class="mm-errors" id="mmFailed" role="alert" hidden></div>
     <div class="mm-errors" id="mmErrors" role="alert" hidden></div>
     <div class="mm-body">
       <section class="mm-left">
-        <div class="mm-empty" id="mmEmpty" hidden>近 72 小時沒有有人參與的 session。</div>
+        <div class="mm-empty" id="mmEmpty" hidden>近 7 天沒有有人參與的 session。</div>
         <div class="mm-scroll" id="mmMap">
           <div class="mm-canvas" id="mmCanvas">
             <svg class="mm-edges" id="mmEdges" aria-hidden="true"></svg>
             <div class="mm-node mm-me" id="mmMe">我<small id="mmMeHours"></small></div>
           </div>
-        </div>
-        <div class="mm-slider">
-          <label for="mmHours">時間範圍：顯示最近 <span id="mmHoursLabel"></span> 小時有活動的 session（其餘變淡）</label>
-          <input id="mmHours" type="range" min="6" max="72" step="6" value="72">
-          <div class="mm-ticks"><span>3 天</span><span>2 天</span><span>1 天</span><span>6 小時 · 現在</span></div>
         </div>
       </section>
       <aside class="mm-side" id="mmDetail"></aside>
@@ -576,6 +631,7 @@ function _mmMount() {
     const card = e.target.closest('.mm-card');
     if (card) {
       _mmSelect(card.dataset.sid);
+      card.scrollIntoView({block: 'nearest', inline: 'nearest'});
       if (e.ctrlKey || e.metaKey) _mmOpen(_mmSession(card.dataset.sid));
       return;
     }
@@ -583,17 +639,17 @@ function _mmMount() {
     if (filter) { mm.filter = filter.dataset.mmFilter; return _mmRender(); }
     const layout = e.target.closest('[data-mm-layout]');
     if (layout) { mm.layout = layout.dataset.mmLayout; mm.centered = false; return _mmRender(); }
-    if (e.target.id === 'mmLinks') { mm.showLinks = !mm.showLinks; return _mmRender(); }
-    if (e.target.id === 'mmReadAll') return _mmMarkAllRead();
+    const hours = e.target.closest('[data-mm-hours]');
+    if (hours) { mm.hours = Number(hours.dataset.mmHours); return _mmRender(); }
+    // Clicking anywhere that is not a control lets go of the selection.
+    if (!e.target.closest('button,input,textarea,select,label,a,#mmDetail')) _mmDeselect();
   });
-  $('mmHours').addEventListener('input', e => { mm.hours = Number(e.target.value); _mmRender(); });
 }
 
 // The panel keeps its DOM while hidden, so returning to the map repaints nothing.
 function showMindmap() {
   _mmMount();
   mm.active = true;
-  _mmShowBack(false);
   _mmStartLive();
   if (mm.data) _mmRender();
   return loadMindmap();
@@ -601,13 +657,55 @@ function showMindmap() {
 
 function hideMindmap() {
   mm.active = false;
+  _mmCloseModal();
   _mmStopLive();
-  _mmShowBack(false);
 }
 
+// The map sits above Chat in the navigation. Upstream's saved tab order puts
+// every other tab after Chat, both at first paint and whenever it is reapplied.
+function _mmNavFirst() {
+  ['.rail', '.sidebar-nav'].forEach(selector => {
+    const nav = document.querySelector(selector);
+    const chat = nav && nav.querySelector('.nav-tab[data-panel="chat"]');
+    const map = nav && nav.querySelector('.nav-tab[data-panel="mindmap"]');
+    if (chat && map && map.nextElementSibling !== chat) nav.insertBefore(map, chat);
+  });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  _mmNavFirst();
+  if (typeof window._applyTabOrder !== 'function') return;
+  const apply = window._applyTabOrder;
+  window._applyTabOrder = function (...args) {
+    const result = apply.apply(this, args);
+    _mmNavFirst();
+    return result;
+  };
+});
+
+// With a card selected: arrows move the selection, Enter opens the workspace,
+// Esc lets go. In the workspace, Esc closes it and keeps the card selected, so
+// the arrows pick the next one straight away.
 document.addEventListener('keydown', e => {
-  if (e.key !== 'Escape' || !$('mmBack') || $('mmBack').hidden) return;
+  if (!mm.active || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.isComposing) return;
   const target = document.activeElement;
-  if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
-  switchPanel('mindmap');
+  const typing = target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable);
+  if (mm.modal) {
+    // A half-written message is worth more than a shortcut.
+    if (e.key === 'Escape' && !(typing && target.value)) { e.preventDefault(); _mmCloseModal(); }
+    return;
+  }
+  if (typing || !mm.selected) return;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    _mmStep(e.key === 'ArrowDown' ? 1 : -1);
+  } else if (e.key === 'Enter') {
+    // Enter on another button presses that button.
+    if (target && target.closest('button:not(.mm-card)')) return;
+    e.preventDefault();
+    _mmOpen(_mmSession(mm.selected));
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    _mmDeselect();
+  }
 });

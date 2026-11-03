@@ -46,7 +46,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           title="New advisory in ${{ steps.rel.outputs.tag }}"
-          body="$(printf 'The daily rescan found advisories in the latest release, or could not check Sonatype.\n\nRun: %s\n\n```\n%s\n```\n\nRebuild the same upstream tag as X.Y.Z.postN.' \
+          body="$(printf 'The daily rescan found advisories in the latest release, or could not check Sonatype.\n\nRun: %s\n\n```\n%s\n```\n\nRebuild the same code with .postN on the affected version.' \
             "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" "$(cat report.md 2>/dev/null)")"
           num=$(gh issue list --repo "${{ github.repository }}" --state open --search "\"$title\" in:title" --json number --jq '.[0].number')
           if [ -n "$num" ]; then gh issue comment "$num" --repo "${{ github.repository }}" --body "$body"

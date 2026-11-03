@@ -10,6 +10,7 @@ import tempfile
 import time
 import types
 import unittest
+import unittest.mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -37,8 +38,10 @@ def _install_stubs() -> None:
     profiles.set_request_profile = lambda name: stubs.update(set=name)
     auth = types.ModuleType("api.auth")
     auth._trusted_auth_bound_profile = lambda _handler: stubs["bound"]
-    sys.modules.update({"api": api, "api.auth": auth, "api.helpers": helpers, "api.models": models,
-                        "api.profiles": profiles})
+    config = types.ModuleType("api.config")
+    config.STATE_DIR = tempfile.mkdtemp()
+    sys.modules.update({"api": api, "api.auth": auth, "api.config": config, "api.helpers": helpers,
+                        "api.models": models, "api.profiles": profiles})
 
 
 _install_stubs()
@@ -86,7 +89,7 @@ class Overview(unittest.TestCase):
 
     def test_window_and_compression(self):
         self.add("recent")
-        self.add("old", ago=73 * 3600)
+        self.add("old", ago=overview.WINDOW_SECONDS + 3600)
         self.add("compressed", end_reason="compression")
         self.assertEqual(self.ids(), {"recent"})
 
@@ -100,20 +103,20 @@ class Overview(unittest.TestCase):
         stubs["live"] = [{"session_id": "streaming", "is_streaming": True}]
         pending = {"asking": {"kind": "approval", "count": 1}}
         got = {s["id"]: s["status"] for s in self.build(pending.get)["sessions"]}
-        self.assertEqual(got, {"idle": "done", "open": "running", "reaped": "failed", "web": "done",
+        self.assertEqual(got, {"idle": "idle", "open": "running", "reaped": "failed", "web": "idle",
                                "streaming": "running", "asking": "waiting"})
 
     def test_attention_outranks_streaming(self):
         self.add("both", source="webui")
         stubs["live"] = [{"session_id": "both", "is_streaming": True}]
         got = self.build({"both": {"kind": "clarify"}}.get)["sessions"][0]
-        self.assertEqual((got["status"], got["next"]), ("waiting", "等待你回答問題"))
+        self.assertEqual((got["status"], got["blocker"]), ("waiting", "等待你回答問題"))
 
     def test_text_is_redacted(self):
         self.add("leak", text="金鑰 sk-secret")
         got = self.build()["sessions"][0]
         self.assertNotIn("sk-secret", str(got))
-        self.assertIn("[REDACTED]", got["goal"])
+        self.assertIn("[REDACTED]", got["progress"])
 
     def test_archived_hidden_and_pin_kept(self):
         self.add("gone")
@@ -159,8 +162,8 @@ class Overview(unittest.TestCase):
         self.assertEqual(self.build()["errors"], [])
 
     def test_pinned_stays_past_the_window(self):
-        self.add("old", ago=200 * 3600)
-        self.add("older", ago=200 * 3600)
+        self.add("old", ago=overview.WINDOW_SECONDS + 3600)
+        self.add("older", ago=overview.WINDOW_SECONDS + 3600)
         stubs["live"] = [{"session_id": "old", "pinned": True}]
         self.assertEqual(self.ids(), {"old"})
 
@@ -178,7 +181,7 @@ class Overview(unittest.TestCase):
             {**row, "session_id": "empty", "message_count": 0},
             {**row, "session_id": "imported", "is_cli_session": True},
             {**row, "session_id": "cron", "raw_source": "cron"},
-            {**row, "session_id": "stale", "updated_at": self.now - 100 * 3600},
+            {**row, "session_id": "stale", "updated_at": self.now - overview.WINDOW_SECONDS - 3600},
             {**row, "session_id": "stranger", "profile": "unlisted"},
             {**row, "session_id": "gone", "archived": True},
         ]
@@ -196,6 +199,80 @@ class Overview(unittest.TestCase):
         before = path.read_bytes()
         self.build()
         self.assertEqual(path.read_bytes(), before)
+
+
+class Progress(unittest.TestCase):
+    def test_takes_the_latest_prompt(self):
+        self.assertEqual(overview._progress([("修好登入",), ("先看錯誤訊息",)]), "修好登入")
+
+    def test_skips_what_no_person_typed(self):
+        for machine in ("[CONTEXT COMPACTION — REFERENCE ONLY] x", "[System: The active model changed]",
+                        "[IMPORTANT: Background process exited]", "[OUT-OF-BAND USER MESSAGE] x",
+                        "[Continuing toward your goal]", "You've reached the maximum number of iterations"):
+            self.assertEqual(overview._progress([(machine,), ("修好登入",)]), "修好登入", machine)
+
+    def test_skips_bare_acknowledgements(self):
+        self.assertEqual(overview._progress([("要",), ("OK!",), ("go on",), ("部署到測試機",)]), "部署到測試機")
+
+    def test_an_acknowledgement_beats_nothing(self):
+        self.assertEqual(overview._progress([("要",), ("[System: x]",)]), "要")
+        self.assertEqual(overview._progress([("[System: x]",)]), "—")
+        self.assertEqual(overview._progress([]), "—")
+
+    def test_file_references_and_attachments_are_not_the_prompt(self):
+        self.assertEqual(overview._progress([("@file:a/b.sh 這樣看得到嗎\n--- Attached Context ---\n很長的檔案",)]),
+                         "這樣看得到嗎")
+        self.assertEqual(overview._progress([("@file:a/b.sh\n--- Attached Context ---\nx",), ("上一個要求",)]), "上一個要求")
+
+    def test_structured_content_is_read_and_redacted(self):
+        self.assertEqual(overview._progress([('[{"type": "text", "text": "看圖 sk-secret"}]',)]), "看圖 [REDACTED]")
+
+
+class Goals(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patch = unittest.mock.patch.object(overview, "STATE_DIR", self.tmp.name)
+        patch.start()
+        self.addCleanup(patch.stop)
+        overview._goals = None
+        stubs.update(active="default")
+
+    def test_a_goal_survives_a_restart_and_is_private(self):
+        self.assertIsNone(overview.set_goal({"session_id": "s", "goal": " 手寫 目標 "}))
+        overview._goals = None
+        self.assertEqual(overview._goal_of("default", "s"), "手寫 目標")
+        self.assertEqual((Path(self.tmp.name) / overview.GOALS_FILE).stat().st_mode & 0o777, 0o600)
+
+    def test_goals_are_per_profile(self):
+        overview.set_goal({"session_id": "s", "goal": "x"})
+        self.assertEqual(overview._goal_of("other", "s"), "")
+
+    def test_empty_goal_returns_to_the_title(self):
+        overview.set_goal({"session_id": "s", "goal": "x"})
+        overview.set_goal({"session_id": "s", "goal": "  "})
+        self.assertEqual(overview._goal_of("default", "s"), "")
+
+    def test_goal_is_redacted_and_bounded(self):
+        overview.set_goal({"session_id": "s", "goal": "sk-secret" + "y" * 999})
+        goal = overview._goal_of("default", "s")
+        self.assertTrue(goal.startswith("[REDACTED]"))
+        self.assertLessEqual(len(goal), overview.GOAL_LIMIT)
+
+    def test_bad_requests_and_a_full_store_are_refused(self):
+        self.assertTrue(overview.set_goal({"goal": "x"}))
+        self.assertTrue(overview.set_goal({"session_id": "s", "goal": 1}))
+        with unittest.mock.patch.object(overview, "MAX_GOALS", 1):
+            self.assertIsNone(overview.set_goal({"session_id": "s", "goal": "x"}))
+            self.assertIsNone(overview.set_goal({"session_id": "s", "goal": "y"}))
+            self.assertTrue(overview.set_goal({"session_id": "t", "goal": "x"}))
+
+    def test_a_corrupt_file_is_kept_aside_not_overwritten(self):
+        path = Path(self.tmp.name) / overview.GOALS_FILE
+        path.write_text("{oops")
+        with self.assertLogs("horo_overview", "WARNING"):
+            overview.set_goal({"session_id": "s", "goal": "x"})
+        self.assertEqual(path.with_suffix(".bad").read_text(), "{oops")
 
 
 class CliRow(unittest.TestCase):
@@ -226,10 +303,17 @@ class CliRow(unittest.TestCase):
         stubs.update(active="other")
         overview.cli_row(self.fetch, "a", False)
         self.assertEqual(self.calls, 3)
-        key = ("other", False)
-        overview._cli_index[key] = (0.0, overview._cli_index[key][1])
+
+    def test_an_old_index_answers_at_once_and_refreshes_behind_the_scenes(self):
         overview.cli_row(self.fetch, "a", False)
-        self.assertEqual(self.calls, 4)
+        key = ("default", False)
+        overview._cli_index[key] = (0.0, overview._cli_index[key][1])
+        self.assertEqual(overview.cli_row(self.fetch, "a", False)["n"], 1)
+        deadline = time.monotonic() + 5
+        while overview._cli_refreshing and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(self.calls, 2)
+        self.assertEqual(overview.cli_row(self.fetch, "a", False)["n"], 2)
 
 
 class ProfileOverride(unittest.TestCase):

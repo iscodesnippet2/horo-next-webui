@@ -162,16 +162,29 @@ with tempfile.TemporaryDirectory() as tmp:
             mindmap = page.evaluate("""() => ({
               cards: [...document.querySelectorAll('.mm-card')].map(c => c.dataset.sid),
               chat: getComputedStyle(document.getElementById('mainChat')).display,
-              actions: document.querySelector('.mm-actions').innerText,
+              open: document.querySelector('.mm-progress-link').title,
+              nav: [...document.querySelectorAll('.rail .nav-tab[data-panel]')].slice(0, 2).map(b => b.dataset.panel),
             })""")
             page.remove_listener("request", on_map_request)
             refused = page.evaluate("""() => fetch('api/horo/overview', {headers: {'X-Horo-Profile': 'nobody'}})
               .then(r => r.status)""")
+            page.evaluate("""() => fetch('api/horo/goal', {method: 'POST', headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({session_id: mm.data.sessions[0].id, goal: '手寫目標'})})""")
+            page.evaluate("loadMindmap()")
+            page.wait_for_function("() => mm.data.sessions[0].goal === '手寫目標'", timeout=5000)
             page.evaluate("_mmOpen(mm.data.sessions[0])")
-            page.wait_for_function("() => document.getElementById('mmBack') && !document.getElementById('mmBack').hidden",
-                                   timeout=15000)
-            page.evaluate("document.getElementById('mmBack').click()")
-            page.wait_for_function("() => _currentPanel === 'mindmap'", timeout=5000)
+            page.wait_for_function("() => document.body.classList.contains('mm-modal')"
+                                   " && !document.body.classList.contains('mm-loading')", timeout=15000)
+            modal = page.evaluate("""() => ({
+              full: document.getElementById('mainChat').getBoundingClientRect().width === innerWidth,
+              session: S.session.session_id === mm.modal, behind: document.getElementById('mainMindmap').inert,
+              panel: _currentPanel, close: document.getElementById('mmModalClose').getAttribute('aria-label'),
+            })""")
+            page.keyboard.press("Escape")
+            page.wait_for_function("() => !document.body.classList.contains('mm-modal')", timeout=5000)
+            kept = page.evaluate("mm.selected === mm.data.sessions[0].id")
+            page.keyboard.press("Escape")
+            page.wait_for_function("() => document.getElementById('mmDetail').hidden", timeout=5000)
             browser.close()
         print(f"  libraries: mermaid {out['mermaidVersion'] or '?'}, pdf.js {out['pdfjsVersion'] or '?'}, "
               f"katex {out['katexVersion'] or '?'}")
@@ -184,8 +197,12 @@ with tempfile.TemporaryDirectory() as tmp:
         check(mindmap["cards"] == ["smoke-human"], "mind map shows only the session a person is in", str(mindmap["cards"]))
         check(mindmap["chat"] == "none", "mind map replaces the chat view")
         check(not map_requests, "selecting a card makes no request", ", ".join(map_requests[:3]))
-        check("開啟工作區" in mindmap["actions"], "mind map offers the workspace", mindmap["actions"])
+        check(mindmap["nav"] == ["mindmap", "chat"], "mind map comes first in the navigation", str(mindmap["nav"]))
+        check(mindmap["open"] == "開啟工作區", "the progress line opens the workspace", mindmap["open"])
         check(refused == 403, "an unknown profile in X-Horo-Profile is refused", str(refused))
+        check(modal == {"full": True, "session": True, "behind": True, "panel": "mindmap", "close": "關閉工作區"},
+              "workspace opens full-screen over the map, with a close button", str(modal))
+        check(kept, "Esc closes the workspace and keeps the card selected")
         check(not external, "no request leaves the machine", ", ".join(sorted(set(external))[:4]))
         check(not errors, "no uncaught page errors", " | ".join(errors[:3]))
     finally:

@@ -231,6 +231,13 @@ edit("api/routes.py", '    """Handle all POST routes. Returns True if handled, F
      '            arm_connection_close_if_body_pending(handler)\n'
      '            return bad(handler, refused, 403)\n')
 edit("api/routes.py",
+     '    if parsed.path == "/api/session/rename":\n        try:\n            require(body, "session_id", "title")\n',
+     '    if parsed.path == "/api/horo/goal":\n'
+     '        from api.horo_overview import set_goal\n'
+     '        refused = set_goal(body)\n'
+     '        return bad(handler, refused) if refused else j(handler, {"ok": True})\n'
+     '    if parsed.path == "/api/session/rename":\n        try:\n            require(body, "session_id", "title")\n')
+edit("api/routes.py",
      '        for row in get_cli_sessions(all_profiles=all_profiles):\n'
      '            if row.get("session_id") == session_id:\n'
      '                return row\n'
@@ -259,18 +266,17 @@ _MM_ICON = ('<svg width="{s}" height="{s}" viewBox="0 0 24 24" fill="none" strok
             '<circle cx="20" cy="18" r="2"/><path d="M9.5 10.5 5.7 7.1M14.5 10.5l3.8-3.4M9.5 13.5l-3.8 3.4M14.5 13.5l3.8 3.4"/></svg>')
 _MM_ATTRS = ('data-panel="mindmap" onclick="switchPanel(\'mindmap\',{fromRailClick:true})" '
              'data-tooltip="心智圖" aria-label="心智圖"')
-sub_once("static/index.html", r'(    <button class="rail-btn nav-tab has-tooltip" data-panel="kanban"[^\n]*\n)',
-         lambda m: m.group(1) + f'    <button class="rail-btn nav-tab has-tooltip" {_MM_ATTRS}>'
-                   + _MM_ICON.format(s=20, w="1.5") + "</button>\n", "rail entry")
-sub_once("static/index.html", r'(      <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="kanban"[^\n]*\n)',
-         lambda m: m.group(1) + f'      <button class="nav-tab has-tooltip has-tooltip--bottom" {_MM_ATTRS} data-label="心智圖">'
-                   + _MM_ICON.format(s=18, w="2") + "</button>\n", "mobile nav entry")
-_MM_LEGEND = "".join(
-    f'<div class="mm-legend-row"><span class="mm-dot" style="background:{c}"></span>{t}</div>'
-    for c, t in (("#1d4ed8", "執行中"), ("#b45309", "等待你（跳動提醒）"), ("#6d28d9", "失敗"), ("#64748b", "已完成")))
+# First in the navigation, above Chat.
+sub_once("static/index.html", r'(    <button class="rail-btn nav-tab active has-tooltip" data-panel="chat"[^\n]*\n)',
+         lambda m: f'    <button class="rail-btn nav-tab has-tooltip" {_MM_ATTRS}>'
+                   + _MM_ICON.format(s=20, w="1.5") + "</button>\n" + m.group(1), "rail entry")
+sub_once("static/index.html", r'(      <button class="nav-tab active has-tooltip has-tooltip--bottom" data-panel="chat"[^\n]*\n)',
+         lambda m: f'      <button class="nav-tab has-tooltip has-tooltip--bottom" {_MM_ATTRS} data-label="心智圖">'
+                   + _MM_ICON.format(s=18, w="2") + "</button>\n" + m.group(1), "mobile nav entry")
 edit("static/index.html", '    <div class="panel-view" id="panelKanban">\n',
-     f'    <div class="panel-view" id="panelMindmap"><div class="panel-head"><span>心智圖</span></div>'
-     f'<div class="mm-legend">{_MM_LEGEND}</div></div>\n'
+     # Empty on purpose: the map needs the room, so the desktop sidebar is hidden
+     # (mindmap.css). Upstream's mobile drawer still needs a panel to show.
+     '    <div class="panel-view" id="panelMindmap"><div class="panel-head"><span>心智圖</span></div></div>\n'
      '    <div class="panel-view" id="panelKanban">\n')
 edit("static/index.html", '    <div id="mainKanban" class="main-view">\n',
      '    <div id="mainMindmap" class="main-view"></div>\n    <div id="mainKanban" class="main-view">\n')

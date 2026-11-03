@@ -9,12 +9,14 @@ is specific to one product.
 An unofficial PyPI repackaging of [Hermes WebUI](https://github.com/nesquena/hermes-webui)
 (MIT), the browser front end for Hermes Agent. Upstream's own wheel cannot start
 its server. horo-next-webui rebuilds each upstream tag as a wheel that installs
-with pip and works offline. Every change is in
+with pip and works offline, and adds one feature, the agent mind map
+([`overlay/mindmap/`](../overlay/mindmap/)). Every change is in
 [`overlay/horo_overlay.py`](../overlay/horo_overlay.py) and
 [`overlay/vendor_assets.py`](../overlay/vendor_assets.py), with the reason for
 each.
 
-- `horo-next-webui X.Y.Z` = upstream `vX.Y.Z` or `exp-vX.Y.Z`.
+- `horo-next-webui X.Y.Z` = upstream `vX.Y.Z` or `exp-vX.Y.Z`; `X.Y.Z.N` is
+  horo's Nth revision on it, `.postN` a rebuild with raised dependencies.
 - Same command (`hermes-webui`) and state directory (`~/.hermes/webui`) as upstream.
 - Runs beside [horo-next](https://github.com/iscodesnippet2/horo-next) (Hermes
   Agent). Python 3.11–3.13.

@@ -19,7 +19,7 @@ on:
         description: "Upstream release tag, e.g. v0.52.113 or exp-v0.52.416"
         required: true
       version:
-        description: "Version to publish, e.g. 0.52.416 (or 0.52.416.post1)"
+        description: "Version: 0.52.416, 0.52.416.N for a horo revision, either with .postN for a rebuild"
         required: true
       publish:
         description: "Publish after verification (false = build and verify only)"
@@ -53,13 +53,17 @@ jobs:
       - name: Test the release gate
         run: uv run --with packaging python -m unittest discover -s overlay/tests -p 'test_*.py'
 
+      # Before any step that puts the inputs in a command, and through the environment.
+      - name: Check the version against the upstream tag
+        env:
+          VERSION: ${{ inputs.version }}
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+        run: python3 overlay/release_version.py "$VERSION" "$UPSTREAM_TAG"
+
       - name: Clone the upstream release
         run: |
           git clone --depth 1 --branch "${{ inputs.upstream_tag }}" \
             https://github.com/nesquena/hermes-webui.git upstream
-          base="${{ inputs.version }}"; base="${base%%.post*}"
-          [ "${{ inputs.upstream_tag }}" = "v$base" ] || [ "${{ inputs.upstream_tag }}" = "exp-v$base" ] \
-            || { echo "version $base does not match tag ${{ inputs.upstream_tag }}"; exit 1; }
 
       - name: Apply the packaging overlay
         run: uv run --with packaging python overlay/horo_overlay.py upstream "${{ inputs.version }}"

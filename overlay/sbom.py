@@ -191,9 +191,10 @@ def generate(a) -> int:
                                    "licenses": [{"expression": "MIT"}],
                                    "externalReferences": [{"type": "vcs",
                                                            "url": f"{UPSTREAM}/tree/{a.upstream_tag}"}]}],
-                    "notes": "Built from the upstream tag with packaging-only changes: distribution name "
+                    "notes": "Built from the upstream tag with packaging changes (distribution name "
                              "and metadata, launcher that never installs, front-end libraries self-hosted "
-                             "and raised, Mermaid rebuilt from a lockfile, dependency floors raised. See "
+                             "and raised, Mermaid rebuilt from a lockfile, dependency floors raised) and "
+                             "one added feature, the agent mind map. See "
                              f"{REPO}/tree/horo/overlay",
                 },
                 "properties": [{"name": "horo:upstream-tag", "value": a.upstream_tag}],

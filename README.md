@@ -84,19 +84,27 @@ a clean result narrows the gap with the mirror, it cannot close it.
 
 **A clean audit is a snapshot.** It holds on the day of the build. The daily
 rescan checks the latest release again and opens an issue on a new advisory;
-the fix is the same upstream tag rebuilt as `X.Y.Z.postN`.
+the fix is the same code rebuilt as `.postN` on the version it fixes.
 
 ## Agent mind map
 
 A panel showing, across every profile, the sessions a person is part of (the
 source allowlist in `overlay/mindmap/horo_overview.py`; cron and kanban are out)
-from the last 72 hours: which run, which wait for you, what changed since you
+from the last 7 days: which run, which wait for you, what changed since you
 looked. Selecting a card uses only the overview, so it loads no transcript and
-leaves the active profile alone. Reply, stop, fork and pin act on any profile
-through `X-Horo-Profile`, a per-request override checked after authentication
-that refuses what `/api/profile/switch` refuses. Ctrl/Cmd-click or "開啟工作區"
-opens upstream's chat view as the workspace, which does switch the active
-profile; Esc or "返回心智圖" comes back without repainting the map.
+leaves the active profile alone. The detail card edits the goal, and its progress
+line opens the workspace; requests for another profile go through `X-Horo-Profile`, a
+per-request override checked after authentication that refuses what
+`/api/profile/switch` refuses. Ctrl/Cmd-click, Enter or the progress line
+lays upstream's chat view over the map as a full-screen workspace, which does
+switch the active profile; the close button or Esc comes back without repainting
+the map, and keeps the card selected. With a card selected, the arrow keys move
+the selection, Enter opens the workspace and Esc lets go.
+
+A card's goal is the session's title, which a person can edit; edits live in
+`horo_goals.json` in the WebUI state directory, so `state.db` stays read-only and
+read-only sessions work too. Progress is the last prompt with substance: messages
+Hermes stores as `user` and bare acknowledgements are skipped. No model is involved.
 
 ## What it does not cover
 
@@ -112,6 +120,18 @@ profile; Esc or "返回心智圖" comes back without repainting the map.
 
 Run the **release** workflow with the upstream tag and version, e.g.
 `exp-v0.52.416` / `0.52.416`. With `publish` off it builds and verifies only.
+
+**Versions** keep upstream's, so each release names what it was built from
+(`overlay/release_version.py` holds a release to this):
+
+| Version | Built from |
+|---|---|
+| `X.Y.Z` | upstream `vX.Y.Z` or `exp-vX.Y.Z`, with the overlay as it was |
+| `X.Y.Z.N` (N from 1) | the same upstream release, with horo's Nth overlay revision (a feature or fix of ours) |
+| either, plus `.postN` | the same code, rebuilt with raised dependencies |
+
+pip orders them `0.52.544 < 0.52.544.post1 < 0.52.544.1 < 0.52.544.2 < 0.52.545`.
+A new upstream release starts again at `X.Y.Z`, carrying every overlay change.
 
 One-time setup (repository settings and PyPI):
 
