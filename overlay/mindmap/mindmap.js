@@ -14,7 +14,8 @@ const MM_STATUS = {
 const MM_STORE_KEY = 'horo-mindmap-v1';
 const MM_POLL_MS = 15000; // Sessions outside this server emit no event.
 const MM_CARD = {w: 480, gap: 14};
-const MM_TREE = {center: 56, profile: 210, session: 570, width: 830};
+// Profile nodes are at most 220px wide: the floating centre and the cards clear them.
+const MM_TREE = {center: 52, profile: 222, session: 584, width: 844};
 const MM_RADIAL = {center: 940, profile: 240, session: 620, width: 1880};
 const MM_CLOSE_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
 const MM_PENCIL_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
@@ -24,7 +25,7 @@ const mm = {
   data: null, version: '', mounted: false, active: false, source: null, poll: null, debounce: null, inFlight: false,
   selected: null, order: [], expanded: {}, hours: 72, filter: 'all', layout: 'tree', showLinks: false, centered: false,
   seen: {}, baseline: 0, cards: new Map(), cardKeys: new Map(),
-  goalOpen: false, busy: false, modal: null, drafts: {},
+  goalOpen: false, busy: false, modal: null, drafts: {}, trunk: null,
 };
 
 function _mmLoadStore() {
@@ -190,7 +191,7 @@ function _mmLayout(groups) {
   svg.setAttribute('height', height);
 
   const cx = geo.center, cy = height / 2;
-  _mmPlace($('mmMe'), cx - 46, cy - 46);
+  mm.trunk = {cx, height, tree, ends: []};
   const anchors = {};
   columns.forEach((column, ci) => {
     const side = tree || ci === 1 ? 1 : -1;
@@ -199,7 +200,8 @@ function _mmLayout(groups) {
       const px = tree ? geo.profile : cx + side * geo.profile;
       const sx = tree ? geo.session : cx + side * geo.session;
       const py = y + g.height / 2;
-      _mmPath(svg, _mmLine(cx, cy, px, py, tree));
+      _mmPath(svg, '', 'mm-trunk');
+      mm.trunk.ends.push({px, py});
       const profile = _mmProfileNode(g);
       canvas.append(profile);
       _mmPlace(profile, px - profile.offsetWidth / 2, py - profile.offsetHeight / 2);
@@ -229,6 +231,23 @@ function _mmLayout(groups) {
     view.scrollLeft = tree ? 0 : cx - view.clientWidth / 2;
     mm.centered = true;
   }
+  _mmFloatMe();
+}
+
+// The centre floats at the middle of what is in view, so a taller map after a
+// range change never pushes it out of sight. Only its own edges are redrawn.
+function _mmFloatMe() {
+  const t = mm.trunk, view = $('mmMap');
+  if (!t || !view) return;
+  const half = 46;
+  // A map shorter than the view keeps the centre level with its profiles.
+  const shown = Math.min(view.clientHeight, t.height);
+  const cy = Math.min(Math.max(view.scrollTop + shown / 2, half), t.height - half);
+  _mmPlace($('mmMe'), t.cx - half, cy - half);
+  $('mmEdges').querySelectorAll('.mm-trunk').forEach((path, i) => {
+    const end = t.ends[i];
+    path.setAttribute('d', _mmLine(t.cx, cy, end.px, end.py, t.tree));
+  });
 }
 
 function _mmProfileNode(g) {
@@ -418,7 +437,9 @@ function _mmModalBar(s) {
   close.setAttribute('aria-label', '關閉工作區');
   close.innerHTML = MM_CLOSE_ICON;
   close.onclick = _mmCloseModal;
-  $('mmModalBar').replaceChildren(dot, heading, badge, close);
+  const centre = _mmEl('div', 'mm-modal-centre');
+  centre.append(dot, heading, badge);
+  $('mmModalBar').replaceChildren(centre, close);
 }
 
 // Up at once, content hidden until the session it belongs to has loaded.
@@ -549,7 +570,9 @@ function _mmHeader() {
   document.querySelectorAll('[data-mm-hours]').forEach(btn => {
     btn.setAttribute('aria-pressed', String(mm.hours === Number(btn.dataset.mmHours)));
   });
-  $('mmMeHours').textContent = `近 ${mm.hours % 24 ? `${mm.hours} 小時` : `${mm.hours / 24} 天`}`;
+  const range = `近 ${mm.hours % 24 ? `${mm.hours} 小時` : `${mm.hours / 24} 天`}`;
+  $('mmMeHours').textContent = range;
+  $('mmMe').setAttribute('aria-label', `時間範圍：${range}，點一下切換`);
 }
 
 function _mmGroups() {
@@ -692,12 +715,16 @@ function _mmMount() {
         <div class="mm-scroll" id="mmMap">
           <div class="mm-canvas" id="mmCanvas">
             <svg class="mm-edges" id="mmEdges" aria-hidden="true"></svg>
-            <div class="mm-node mm-me" id="mmMe">我<small id="mmMeHours"></small></div>
+            <button type="button" class="mm-node mm-me" id="mmMe" title="點一下切換時間範圍">我<small id="mmMeHours"></small></button>
           </div>
         </div>
       </section>
       <aside class="mm-side" id="mmDetail"></aside>
     </div>`;
+  let floating = 0;
+  const float = () => { cancelAnimationFrame(floating); floating = requestAnimationFrame(_mmFloatMe); };
+  $('mmMap').addEventListener('scroll', float, {passive: true});
+  window.addEventListener('resize', float);
   root.addEventListener('click', e => {
     const card = e.target.closest('.mm-card');
     if (card) {
@@ -712,8 +739,20 @@ function _mmMount() {
     if (layout) { mm.layout = layout.dataset.mmLayout; mm.centered = false; return _mmRender(); }
     const hours = e.target.closest('[data-mm-hours]');
     if (hours) { mm.hours = Number(hours.dataset.mmHours); return _mmRender(); }
+    // The centre steps through the same ranges as the buttons, wrapping round.
+    if (e.target.closest('#mmMe')) {
+      const ranges = [...document.querySelectorAll('[data-mm-hours]')].map(b => Number(b.dataset.mmHours));
+      mm.hours = ranges[(ranges.indexOf(mm.hours) + 1) % ranges.length];
+      return _mmRender();
+    }
     // Clicking anywhere that is not a control lets go of the selection.
     if (!e.target.closest('button,input,textarea,select,label,a,#mmDetail')) _mmDeselect();
+  });
+  // The first click of the two has already selected the card.
+  root.addEventListener('dblclick', e => {
+    const card = e.target.closest('.mm-card');
+    const s = card && _mmSession(card.dataset.sid);
+    if (s && !mm.modal) _mmOpen(s);
   });
 }
 

@@ -33,9 +33,14 @@ main.main.showing-mindmap > #mainChat{display:none !important;}
 .mm-node{position:absolute;left:0;top:0;transition:opacity .2s;}
 .mm-me{width:92px;height:92px;border-radius:50%;background:#0f172a;color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;font-size:18px;font-weight:700;}
 .mm-me small{font-size:11px;font-weight:400;color:#cbd5e1;}
+.mm-me{border:0;padding:0;font-family:inherit;cursor:pointer;user-select:none;}
+.mm-me:hover{box-shadow:0 0 0 3px var(--accent,#2563eb);}
+.mm-me:focus-visible{outline:3px solid var(--text);outline-offset:2px;}
 .mm-profile{display:flex;flex-direction:column;align-items:center;gap:6px;}
 .mm-profile-pill{display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px 14px;min-width:132px;background:var(--bg);border:2px solid var(--text);border-radius:999px;font-size:15px;font-weight:700;}
 .mm-profile-pill small{font-size:11px;font-weight:400;color:var(--muted);}
+.mm-profile-pill{box-sizing:border-box;max-width:220px;overflow:hidden;}
+.mm-profile-pill small{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .mm-profile-pill{cursor:pointer;user-select:none;}
 .mm-profile-pill:hover{border-color:var(--accent,#2563eb);}
 .mm-profile-pill:focus-visible{outline:3px solid var(--text);outline-offset:2px;}
@@ -85,11 +90,21 @@ main.main.showing-mindmap > #mainChat{display:none !important;}
 /* The modal is #mainChat itself, so upstream's chat keeps working inside it.
    Below 200, where upstream's menus and dialogs start. */
 #mmModalBar{display:none;}
-body.mm-modal #mmModalBar{position:fixed;top:0;left:0;right:0;height:60px;box-sizing:border-box;z-index:150;display:flex;align-items:center;gap:10px;padding:0 12px 0 20px;background:var(--bg);border-bottom:1px solid var(--border);color:var(--text);font-family:var(--font-ui);}
+body.mm-modal #mmModalBar{position:fixed;top:0;left:0;right:0;height:60px;box-sizing:border-box;z-index:150;display:flex;align-items:center;justify-content:center;padding:0 150px;background:var(--bg);border-bottom:1px solid var(--border);color:var(--text);font-family:var(--font-ui);}
 body.mm-modal main.main.showing-mindmap > #mainChat{display:flex !important;position:fixed;inset:60px 0 0 0;z-index:150;}
 body.mm-modal.mm-loading main.main.showing-mindmap > #mainChat{visibility:hidden;}
-.mm-modal-heading{display:flex;flex-direction:column;min-width:0;margin-right:auto;}
-.mm-modal-heading strong{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-#mmModalBar .mm-close{flex:none;}
+/* Title centred, its time just after it; the close button keeps the right edge. */
+.mm-modal-centre{position:relative;display:flex;min-width:0;max-width:100%;}
+.mm-modal-heading{display:flex;flex-direction:column;align-items:center;text-align:center;min-width:0;}
+.mm-modal-centre .mm-dot{position:absolute;right:100%;top:50%;margin:-5px 10px 0 0;}
+.mm-modal-centre .mm-badge{position:absolute;left:100%;top:50%;transform:translateY(-50%);margin-left:10px;white-space:nowrap;}
+@media (max-width:640px){
+  body.mm-modal #mmModalBar{padding:0 64px 0 16px;justify-content:flex-start;}
+  .mm-modal-centre{position:static;align-items:center;gap:8px;}
+  .mm-modal-heading{align-items:flex-start;text-align:left;}
+  .mm-modal-centre .mm-dot,.mm-modal-centre .mm-badge{position:static;margin:0;transform:none;flex:none;}
+}
+.mm-modal-heading strong{max-width:100%;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+#mmModalBar .mm-close{flex:none;position:absolute;right:12px;top:50%;transform:translateY(-50%);}
 .mm-empty{padding:40px 20px;text-align:center;color:var(--muted);font-size:14px;}
 @media (max-width:900px){.mm-body{flex-direction:column;}.mm-side{flex:none;width:100%;}}

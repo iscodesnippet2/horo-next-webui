@@ -100,7 +100,10 @@ per-request override checked after authentication that refuses what
 lays upstream's chat view over the map as a full-screen workspace, which does
 switch the active profile; the close button or Esc comes back without repainting
 the map, and keeps the card selected. With a card selected, the arrow keys move
-the selection, Enter opens the workspace and Esc lets go. Double-clicking a
+the selection, Enter opens the workspace and Esc lets go. Double-clicking a card
+opens its workspace too. Clicking the centre node steps through the time ranges; it stays at the middle of the view
+as the map scrolls.
+Double-clicking a
 profile (or Enter on it) starts a session there with upstream's New Chat, in that
 profile's last workspace, and opens it as the workspace; an empty one the map
 started before is reused. Its card appears once it has a message, and is

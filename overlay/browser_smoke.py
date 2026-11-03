@@ -179,12 +179,40 @@ with tempfile.TemporaryDirectory() as tmp:
               full: document.getElementById('mainChat').getBoundingClientRect().width === innerWidth,
               session: S.session.session_id === mm.modal, behind: document.getElementById('mainMindmap').inert,
               panel: _currentPanel, close: document.getElementById('mmModalClose').getAttribute('aria-label'),
+              centred: (h => Math.abs(h.left + h.width / 2 - innerWidth / 2) < 2)(
+                document.querySelector('.mm-modal-heading').getBoundingClientRect()),
             })""")
             page.keyboard.press("Escape")
             page.wait_for_function("() => !document.body.classList.contains('mm-modal')", timeout=5000)
             kept = page.evaluate("mm.selected === mm.data.sessions[0].id")
             page.keyboard.press("Escape")
             page.wait_for_function("() => document.getElementById('mmDetail').hidden", timeout=5000)
+            # The centre sits at the middle of the part of the map in view, at both ends of the scroll.
+            level = page.evaluate("""async () => {
+              const view = document.getElementById('mmMap');
+              const at = async top => {
+                view.scrollTop = top;
+                await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+                const me = document.getElementById('mmMe').getBoundingClientRect();
+                const v = view.getBoundingClientRect(), c = document.getElementById('mmCanvas').getBoundingClientRect();
+                const shown = (Math.max(v.top, c.top) + Math.min(v.top + view.clientHeight, c.bottom)) / 2;
+                return Math.round(me.top + me.height / 2 - shown);
+              };
+              const out = [await at(0), await at(1e6)];
+              view.scrollTop = 0;
+              return out;
+            }""")
+            ranges = page.evaluate("""() => [0, 1, 2, 3, 4].map(() => {
+              document.getElementById('mmMe').click();
+              return mm.hours;
+            })""")
+            page.evaluate("document.querySelector('.mm-card')"
+                          ".dispatchEvent(new MouseEvent('dblclick', {bubbles: true}))")
+            page.wait_for_function("() => document.body.classList.contains('mm-modal')"
+                                   " && !document.body.classList.contains('mm-loading')", timeout=15000)
+            card_open = page.evaluate("S.session.session_id === document.querySelector('.mm-card').dataset.sid")
+            page.keyboard.press("Escape")
+            page.wait_for_function("() => !document.body.classList.contains('mm-modal')", timeout=5000)
             opened = "() => document.body.classList.contains('mm-modal') && !document.body.classList.contains('mm-loading')"
             new_chat = []
             for _ in range(2):
@@ -212,9 +240,14 @@ with tempfile.TemporaryDirectory() as tmp:
         check(mindmap["nav"] == ["mindmap", "chat"], "mind map comes first in the navigation", str(mindmap["nav"]))
         check(mindmap["open"] == "開啟工作區", "the progress line opens the workspace", mindmap["open"])
         check(refused == 403, "an unknown profile in X-Horo-Profile is refused", str(refused))
-        check(modal == {"full": True, "session": True, "behind": True, "panel": "mindmap", "close": "關閉工作區"},
-              "workspace opens full-screen over the map, with a close button", str(modal))
+        check(modal == {"full": True, "session": True, "behind": True, "panel": "mindmap", "close": "關閉工作區",
+                       "centred": True},
+              "workspace opens full-screen over the map, title centred, with a close button", str(modal))
         check(kept, "Esc closes the workspace and keeps the card selected")
+        check(all(abs(off) <= 2 for off in level), "the centre stays at the middle of the map in view",
+              f"offsets {level} px")
+        check(ranges ==[48, 24, 6, 168, 72], "clicking the centre steps through the time ranges", str(ranges))
+        check(card_open, "double-clicking a card opens its workspace")
         first = new_chat[0]
         check(first["id"] != "smoke-human" and first["modal"] and first["profile"] == "default" and first["empty"],
               "double-clicking a profile opens a new session in its workspace", str(first))
