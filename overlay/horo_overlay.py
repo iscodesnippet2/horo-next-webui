@@ -212,7 +212,7 @@ edit("api/routes.py",
      '    if parsed.path == "/api/horo/overview":\n'
      '        from api.horo_overview import build as _horo_overview\n'
      '        return j(handler, _horo_overview(_session_attention_summary,\n'
-     '                                         parse_qs(parsed.query).get("since", [""])[0]))\n\n'
+     '                                         parse_qs(parsed.query).get("since", [""])[0], handler=handler))\n\n'
      '    if parsed.path == "/api/session":\n        return _handle_session_get(handler, parsed)\n')
 # A map action on another profile's session is scoped to that one request.
 edit("api/routes.py", '    """Handle all GET routes. Returns True if handled, False for 404."""\n',

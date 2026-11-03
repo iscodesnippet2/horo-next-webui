@@ -366,14 +366,30 @@ def profile_override(handler) -> str | None:
     return None
 
 
-def build(attention_of, since: str = "") -> dict:
+def readable_profiles(handler, names: list) -> list:
+    """The profiles this request may read.
+
+    A login bound to a profile, or a server isolated to one, sees only that one:
+    the map shows prompts, so listing every profile would hand them to anyone
+    signed in. A bound profile that does not exist leaves nothing.
+    """
+    bound = _trusted_auth_bound_profile(handler)
+    if bound:
+        return [name for name in names if name == bound]
+    if _is_isolated_profile_mode():
+        active = get_active_profile_name()
+        return [name for name in names if name == active]
+    return names
+
+
+def build(attention_of, since: str = "", *, handler) -> dict:
     """Return the overview, or just ``{"unchanged": true}`` if ``since`` still matches."""
     now = time.time()
     cutoff = now - WINDOW_SECONDS
     live = _live_state()
     profiles, sessions, links, errors = [], [], [], []
-    for entry in list_profiles_api():
-        name = entry.get("name") or "default"
+    names = [entry.get("name") or "default" for entry in list_profiles_api()]
+    for name in readable_profiles(handler, names):
         profiles.append(name)
         try:
             found, forks = _read_profile(name, get_hermes_home_for_profile(name), cutoff, now, live, attention_of)

@@ -91,7 +91,8 @@ the fix is the same code rebuilt as `.postN` on the version it fixes.
 A panel showing, across every profile, the sessions a person is part of (the
 source allowlist in `overlay/mindmap/horo_overview.py`; cron and kanban are out)
 from the last 7 days: which run, which wait for you, what changed since you
-looked. Selecting a card uses only the overview, so it loads no transcript and
+looked. A login bound to one profile, or a server isolated to one, sees only that
+profile's sessions. Selecting a card uses only the overview, so it loads no transcript and
 leaves the active profile alone. The detail card edits the goal, and its progress
 line opens the workspace; requests for another profile go through `X-Horo-Profile`, a
 per-request override checked after authentication that refuses what

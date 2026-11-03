@@ -53,6 +53,10 @@ def no_attention(_sid):
     return None
 
 
+def FakeHandler():  # noqa: N802  Stands in for a request; the stubs decide what it is bound to.
+    return types.SimpleNamespace(headers={})
+
+
 class Overview(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -75,7 +79,7 @@ class Overview(unittest.TestCase):
         self.conn.commit()
 
     def build(self, attention=no_attention):
-        return overview.build(attention)
+        return overview.build(attention, handler=FakeHandler())
 
     def ids(self):
         return {s["id"] for s in self.build()["sessions"]}
@@ -141,9 +145,9 @@ class Overview(unittest.TestCase):
     def test_unchanged_version(self):
         self.add("one")
         version = self.build()["version"]
-        self.assertEqual(overview.build(no_attention, version), {"unchanged": True, "version": version})
+        self.assertEqual(overview.build(no_attention, version, handler=FakeHandler()), {"unchanged": True, "version": version})
         self.add("two")
-        self.assertIn("sessions", overview.build(no_attention, version))
+        self.assertIn("sessions", overview.build(no_attention, version, handler=FakeHandler()))
 
     def test_unreadable_profile_is_reported_not_dropped(self):
         broken = Path(self.tmp.name) / "broken"
@@ -340,6 +344,54 @@ class ProfileOverride(unittest.TestCase):
     def test_bound_profile_may_be_named(self):
         stubs.update(bound="other")
         self.assertIsNone(self.override("other"))
+
+
+class ReadableProfiles(unittest.TestCase):
+    """The overview carries prompts: a login bound to one profile must not read the others."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        homes = {}
+        for name in ("default", "other"):
+            home = Path(self.tmp.name) / name
+            home.mkdir()
+            conn = sqlite3.connect(home / "state.db")
+            conn.executescript(SCHEMA)
+            now = time.time()
+            conn.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?)",
+                         (f"{name}-s", "desktop", name, None, None, now, now, now, None, 1))
+            conn.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?,?,?,?)",
+                         (f"{name}-s", "user", f"{name} 的提示", now))
+            conn.commit()
+            conn.close()
+            homes[name] = home
+        stubs.update(profiles=["default", "other"], homes=homes, live=[], active="default", isolated=False,
+                     bound=None, set=None)
+
+    def read(self):
+        data = overview.build(no_attention, handler=FakeHandler())
+        return data["profiles"], sorted(s["id"] for s in data["sessions"])
+
+    def test_unbound_reads_every_profile(self):
+        self.assertEqual(self.read(), (["default", "other"], ["default-s", "other-s"]))
+
+    def test_bound_login_reads_only_its_profile(self):
+        stubs.update(bound="other")
+        self.assertEqual(self.read(), (["other"], ["other-s"]))
+
+    def test_isolated_server_reads_only_the_active_profile(self):
+        stubs.update(isolated=True, active="other")
+        self.assertEqual(self.read(), (["other"], ["other-s"]))
+
+    def test_bound_to_a_missing_profile_reads_nothing(self):
+        stubs.update(bound="gone")
+        self.assertEqual(self.read(), ([], []))
+
+    def test_a_fresh_fork_of_another_profile_stays_hidden(self):
+        stubs.update(bound="other", live=[{"session_id": "fork", "profile": "default", "message_count": 1,
+                                           "updated_at": time.time(), "title": "default 的分叉"}])
+        self.assertEqual(self.read(), (["other"], ["other-s"]))
 
 
 if __name__ == "__main__":
