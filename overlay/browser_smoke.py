@@ -84,13 +84,19 @@ CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, ro
 
 
 def seed_mindmap(hermes_home: Path) -> None:
-    hermes_home.mkdir(parents=True, exist_ok=True)
     now = time.time()
-    with sqlite3.connect(hermes_home / "state.db") as db:
-        db.executescript(MINDMAP_DB)
-        for sid, source in (("smoke-human", "desktop"), ("smoke-cron", "cron")):
-            db.execute("INSERT INTO sessions VALUES (?,?,?,NULL,NULL,NULL,?,?,NULL,1)", (sid, source, sid, now, now))
-            db.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?,'user','smoke',?)", (sid, now))
+    # A second profile, so a tab can be left believing it is on the wrong one. Without
+    # the agent installed upstream lists only default, so the map shows none of it.
+    for home, rows in ((hermes_home, (("smoke-human", "desktop"), ("smoke-cron", "cron"))),
+                       (hermes_home / "profiles" / "smoke-second", (("smoke-second", "desktop"),))):
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "config.yaml").touch()
+        with sqlite3.connect(home / "state.db") as db:
+            db.executescript(MINDMAP_DB)
+            for sid, source in rows:
+                db.execute("INSERT INTO sessions VALUES (?,?,?,NULL,NULL,NULL,?,?,NULL,1)", (sid, source, sid, now, now))
+                db.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?,'user','smoke',?)",
+                           (sid, now))
 
 
 failures: list[str] = []
@@ -150,6 +156,13 @@ with tempfile.TemporaryDirectory() as tmp:
             page.goto(base + "/", wait_until="load")
             page.wait_for_function("typeof renderMermaidBlocks === 'function' && typeof Prism !== 'undefined'",
                                    timeout=30000)
+            # A page load lands on the mind map; the render probe needs the chat view.
+            try:
+                page.wait_for_function("() => S._bootReady && _currentPanel === 'mindmap'", timeout=15000)
+                landed = True
+            except Exception:
+                landed = False
+            page.evaluate("switchPanel('chat')")
             out = page.evaluate(PROBE)
             page.evaluate("switchPanel('mindmap')")
             page.wait_for_selector(".mm-card", timeout=15000)
@@ -225,6 +238,25 @@ with tempfile.TemporaryDirectory() as tmp:
                 })"""))
                 page.keyboard.press("Escape")
                 page.wait_for_function("() => !document.body.classList.contains('mm-modal')", timeout=5000)
+            # Every tab shares the profile cookie. Another tab switching it leaves this
+            # one believing it is still on default, where upstream skips the switch.
+            stale = page.evaluate("""async () => {
+              const otherTab = name => api('/api/profile/switch', {method: 'POST', body: JSON.stringify({name})});
+              const server = async () => (await api('/api/profile/active')).name;
+              const out = {believed: S.activeProfile};
+              await otherTab('smoke-second');
+              out.moved = await server();
+              await _mmOpen(mm.data.sessions.find(s => s.id === 'smoke-human'));
+              out.open = mm.modal === 'smoke-human' && S.session.session_id === 'smoke-human';
+              out.server = await server();
+              // And while the workspace is open: coming back to this tab takes the profile back.
+              await otherTab('smoke-second');
+              window.dispatchEvent(new Event('focus'));
+              for (let i = 0; i < 25 && await server() !== 'default'; i++) await new Promise(r => setTimeout(r, 200));
+              out.held = await server();
+              _mmCloseModal();
+              return out;
+            }""")
             browser.close()
         print(f"  libraries: mermaid {out['mermaidVersion'] or '?'}, pdf.js {out['pdfjsVersion'] or '?'}, "
               f"katex {out['katexVersion'] or '?'}")
@@ -235,6 +267,7 @@ with tempfile.TemporaryDirectory() as tmp:
         check(out["prism"], "Prism highlights Python via its autoloader")
         check(out["xterm"], "xterm constructs a terminal")
         check(mindmap["cards"] == ["smoke-human"], "mind map shows only the session a person is in", str(mindmap["cards"]))
+        check(landed, "a page load opens on the mind map")
         check(mindmap["chat"] == "none", "mind map replaces the chat view")
         check(not map_requests, "selecting a card makes no request", ", ".join(map_requests[:3]))
         check(mindmap["nav"] == ["mindmap", "chat"], "mind map comes first in the navigation", str(mindmap["nav"]))
@@ -252,6 +285,8 @@ with tempfile.TemporaryDirectory() as tmp:
         check(first["id"] != "smoke-human" and first["modal"] and first["profile"] == "default" and first["empty"],
               "double-clicking a profile opens a new session in its workspace", str(first))
         check(new_chat[1]["id"] == first["id"], "an unused new session is reused, not duplicated", str(new_chat))
+        check(stale == {"believed": "default", "moved": "smoke-second", "open": True, "server": "default", "held": "default"},
+              "a card opens in its own profile after another tab switched profile, and keeps it", str(stale))
         check(not external, "no request leaves the machine", ", ".join(sorted(set(external))[:4]))
         check(not errors, "no uncaught page errors", " | ".join(errors[:3]))
     finally:

@@ -254,6 +254,15 @@ edit("static/sessions.js",
      "    if(typeof renderSessionList==='function') await renderSessionList();\n",
      "    if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);\n"
      "    if(typeof renderSessionList==='function') void renderSessionList();\n")
+# A page load opens on the mind map, over whatever session it restores, unless
+# ?panel= names a panel or the mind map tab is hidden.
+edit("static/boot.js",
+     "    }catch(e){console.warn('[boot] panel intent launch failed', e);}\n  }\n"
+     "  // Apply the honored intent over whatever the restore path below settled on.\n",
+     "    }catch(e){console.warn('[boot] panel intent launch failed', e);}\n  }\n"
+     "  if(!pendingPanelIntent&&!(panelIntent&&panelIntent.hasParam&&panelIntent.valid)\n"
+     "     &&!(typeof _getHiddenTabs==='function'&&_getHiddenTabs().includes('mindmap'))) pendingPanelIntent='mindmap';\n"
+     "  // Apply the honored intent over whatever the restore path below settled on.\n")
 edit("static/panels.js", "'kanban','workspaces','profiles','insights','logs','plugin'];",
      "'kanban','mindmap','workspaces','profiles','insights','logs','plugin'];")
 edit("static/panels.js", "  if (nextPanel === 'kanban') await loadKanban();\n",

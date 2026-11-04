@@ -25,7 +25,7 @@ const mm = {
   data: null, version: '', mounted: false, active: false, source: null, poll: null, debounce: null, inFlight: false,
   selected: null, order: [], expanded: {}, hours: 72, filter: 'all', layout: 'tree', showLinks: false, centered: false,
   seen: {}, baseline: 0, cards: new Map(), cardKeys: new Map(),
-  goalOpen: false, busy: false, modal: null, drafts: {}, trunk: null,
+  goalOpen: false, busy: false, modal: null, drafts: {}, trunk: null, holding: false,
 };
 
 function _mmLoadStore() {
@@ -474,17 +474,61 @@ async function _mmOpen(s) {
   _mmSaveStore();
   _mmOpenBar(s);
   try {
+    // The card's profile is where state.db holds the session; nothing else decides.
+    await _mmEnsureProfile(s.profile);
     if (s.read_only) {
-      // Same as the sidebar: a failed import still opens read-only.
-      await _mmRequest(s, '/api/session/import_cli', {session_id: s.id}).catch(() => {});
+      // Same as the sidebar: a failed import still opens read-only, unless the
+      // WebUI already filed the session under another profile.
+      await _mmRequest(s, '/api/session/import_cli', {session_id: s.id}).catch(e => {
+        if (_sessionProfileMismatchFromError(e)) throw e;
+      });
     }
-    await loadSession(s.id);
-    // The composer must never sit under another session's title.
-    if (!S.session || S.session.session_id !== s.id) throw new Error('載入的不是這個 session');
+    // Never follow the session to another profile: that is the card being wrong.
+    await loadSession(s.id, {skipProfileResolve: true});
+    if (!S.session || S.session.session_id !== s.id) {
+      // loadSession reports on the page, not to its caller: ask once more for the reason.
+      await api(`/api/session?session_id=${encodeURIComponent(s.id)}&messages=0&resolve_model=0`);
+      throw new Error('載入的不是這個 session');
+    }
+    // The composer must never sit under another session's title, or another profile.
+    const owner = S.session.profile || 'default';
+    if (owner !== s.profile) throw new Error(_mmMismatch(s.profile, owner));
     document.body.classList.remove('mm-loading');
   } catch (e) {
     if (mm.modal === s.id) _mmCloseModal();
-    showToast(`無法開啟工作區：${e.message || e}`, 4000);
+    const other = _sessionProfileMismatchFromError(e);
+    showToast(`無法開啟工作區：${other ? _mmMismatch(s.profile, other.profile) : e.message || e}`, 5000);
+  }
+}
+
+function _mmMismatch(card, owner) {
+  return `卡片在 ${card}，WebUI 卻把這個會話記在 ${owner}`;
+}
+
+// Every tab of this WebUI shares one profile cookie, so another tab switching
+// profile leaves this one's S.activeProfile stale, and upstream skips a switch to
+// the profile it believes is already active. Ask the server, then switch for real.
+async function _mmEnsureProfile(name) {
+  const server = await api('/api/profile/active');
+  if (server.name === name && S.activeProfile === name) return;
+  if (S.activeProfile === name) S.activeProfile = server.name;
+  await _switchProfileForSessionLoad(name);
+  if (S.activeProfile !== name) throw new Error(`無法切換到 ${name}`);
+}
+
+// Back in this tab with a workspace open: another tab may have moved the cookie,
+// and the next message would go out under its profile.
+async function _mmHoldProfile() {
+  if (mm.holding || !mm.modal || document.hidden || !S.session || S.session.session_id !== mm.modal) return;
+  const profile = S.session.profile || 'default';
+  // Focus and visibilitychange arrive together.
+  mm.holding = true;
+  try {
+    await _mmEnsureProfile(profile);
+  } catch (e) {
+    showToast(`工作區的 profile ${profile} 已被其他分頁切走，且切不回來：${e.message || e}`, 6000);
+  } finally {
+    mm.holding = false;
   }
 }
 
@@ -498,8 +542,7 @@ async function _mmNewSession(profile) {
   const pending = mm.modal = `new:${profile}`;
   _mmOpenBar(draft);
   try {
-    await _switchProfileForSessionLoad(profile);
-    if (S.activeProfile !== profile) throw new Error(`無法切換到 ${profile}`);
+    await _mmEnsureProfile(profile);
     const reused = await _mmReuseDraft(profile);
     if (!reused) {
       // The profile's own workspace, not that of whatever session was open last.
@@ -792,6 +835,9 @@ document.addEventListener('DOMContentLoaded', () => {
     return result;
   };
 });
+
+window.addEventListener('focus', _mmHoldProfile);
+document.addEventListener('visibilitychange', _mmHoldProfile);
 
 // With a card selected: arrows move the selection, Enter opens the workspace,
 // Esc lets go. In the workspace, Esc closes it and keeps the card selected, so

@@ -91,7 +91,8 @@ the fix is the same code rebuilt as `.postN` on the version it fixes.
 A panel showing, across every profile, the sessions a person is part of (the
 source allowlist in `overlay/mindmap/horo_overview.py`; cron and kanban are out)
 from the last 7 days: which run, which wait for you, what changed since you
-looked. A login bound to one profile, or a server isolated to one, sees only that
+looked. The page opens on it, over whatever session upstream restores, unless
+`?panel=` names another panel or its tab is hidden. A login bound to one profile, or a server isolated to one, sees only that
 profile's sessions. Selecting a card uses only the overview, so it loads no transcript and
 leaves the active profile alone. The detail card edits the goal, and its progress
 line opens the workspace; requests for another profile go through `X-Horo-Profile`, a
@@ -108,6 +109,15 @@ profile (or Enter on it) starts a session there with upstream's New Chat, in tha
 profile's last workspace, and opens it as the workspace; an empty one the map
 started before is reused. Its card appears once it has a message, and is
 selected when the workspace closes.
+
+A card's profile is the one whose `state.db` holds the session, and the
+workspace opens in that profile or not at all: if the WebUI has the session
+filed under another profile, opening fails and names both. Every tab of a WebUI
+shares one profile cookie, so another tab switching profile cannot be trusted
+to show in this one: opening a card asks the server which profile is active and
+switches for real, and coming back to a tab with a workspace open switches back
+to the workspace's profile. Two WebUI servers on one host share the cookie too;
+give each its own `HERMES_WEBUI_PROFILE_COOKIE_NAME`.
 
 A card's goal is the session's title, which a person can edit; edits live in
 `horo_goals.json` in the WebUI state directory, so `state.db` stays read-only and
