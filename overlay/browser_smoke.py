@@ -185,6 +185,7 @@ with tempfile.TemporaryDirectory() as tmp:
               body: JSON.stringify({session_id: mm.data.sessions[0].id, goal: '手寫目標'})})""")
             page.evaluate("loadMindmap()")
             page.wait_for_function("() => mm.data.sessions[0].goal === '手寫目標'", timeout=5000)
+            fresh = page.evaluate("mm.data.sessions[0].imported")
             page.evaluate("_mmOpen(mm.data.sessions[0])")
             page.wait_for_function("() => document.body.classList.contains('mm-modal')"
                                    " && !document.body.classList.contains('mm-loading')", timeout=15000)
@@ -200,16 +201,15 @@ with tempfile.TemporaryDirectory() as tmp:
             kept = page.evaluate("mm.selected === mm.data.sessions[0].id")
             page.keyboard.press("Escape")
             page.wait_for_function("() => document.getElementById('mmDetail').hidden", timeout=5000)
-            # The centre sits at the middle of the part of the map in view, at both ends of the scroll.
+            # The centre sits at a fixed place in the view (MM_ME_AT), at both ends of the scroll.
             level = page.evaluate("""async () => {
               const view = document.getElementById('mmMap');
               const at = async top => {
                 view.scrollTop = top;
                 await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
                 const me = document.getElementById('mmMe').getBoundingClientRect();
-                const v = view.getBoundingClientRect(), c = document.getElementById('mmCanvas').getBoundingClientRect();
-                const shown = (Math.max(v.top, c.top) + Math.min(v.top + view.clientHeight, c.bottom)) / 2;
-                return Math.round(me.top + me.height / 2 - shown);
+                const place = view.getBoundingClientRect().top + view.clientTop + view.clientHeight * MM_ME_AT;
+                return Math.round(me.top + me.height / 2 - place);
               };
               const out = [await at(0), await at(1e6)];
               view.scrollTop = 0;
@@ -219,6 +219,26 @@ with tempfile.TemporaryDirectory() as tmp:
               document.getElementById('mmMe').click();
               return mm.hours;
             })""")
+            # A profile whose only session is older than the range is left off the map.
+            pruned = page.evaluate("""() => {
+              const s = mm.data.sessions.find(s => s.id === 'smoke-human');
+              const pills = () => document.querySelectorAll('.mm-profile-pill').length;
+              // Selected cards always show; closing a workspace reselects its card late.
+              _mmDeselect();
+              const {last_activity_at: at, status} = s;
+              const out = [pills()];
+              // Idle too: a running session stays on the map however old.
+              Object.assign(s, {last_activity_at: Date.now() / 1000 - 30 * 86400, status: 'idle'});
+              _mmRender();
+              // The centre stays, alone, so a wider range is one click away.
+              out.push(pills(), !document.getElementById('mmEmpty').hidden,
+                       document.getElementById('mmMe').getBoundingClientRect().width > 0,
+                       document.getElementById('mmEdges').children.length);
+              Object.assign(s, {last_activity_at: at, status});
+              _mmRender();
+              out.push(pills());
+              return out;
+            }""")
             page.evaluate("document.querySelector('.mm-card')"
                           ".dispatchEvent(new MouseEvent('dblclick', {bubbles: true}))")
             page.wait_for_function("() => document.body.classList.contains('mm-modal')"
@@ -257,6 +277,34 @@ with tempfile.TemporaryDirectory() as tmp:
               _mmCloseModal();
               return out;
             }""")
+            # The card has been opened, so the WebUI holds a copy: the next open shows it
+            # first and imports behind it, in the window chosen on the map.
+            later = page.evaluate("""async () => {
+              await loadMindmap();
+              const s = mm.data.sessions.find(s => s.id === 'smoke-human');
+              const tail = document.getElementById('mmTail');
+              tail.value = '10';
+              tail.dispatchEvent(new Event('change'));
+              // Away first: reopening the session already loaded requests nothing.
+              await loadSession(mm.drafts.default);
+              const seen = [];
+              const real = api;
+              api = (path, opts) => {
+                seen.push(`${path.startsWith('/api/session/import_cli') ? 'import' : /messages=1/.test(path) ? 'load' : 'other'}`
+                          + `${document.body.classList.contains('mm-loading') ? '' : '+shown'}`
+                          + `${/msg_limit=10&/.test(path) ? '+10' : ''}`);
+                return real(path, opts);
+              };
+              try {
+                await _mmOpen(s);
+                for (let i = 0; i < 25 && !seen.some(x => x.startsWith('import')); i++) await new Promise(r => setTimeout(r, 200));
+              } finally {
+                api = real;
+              }
+              _mmCloseModal();
+              return {imported: s.imported, seen: seen.filter(x => !x.startsWith('other')),
+                      stored: localStorage.getItem('horo-initial-messages')};
+            }""")
             browser.close()
         print(f"  libraries: mermaid {out['mermaidVersion'] or '?'}, pdf.js {out['pdfjsVersion'] or '?'}, "
               f"katex {out['katexVersion'] or '?'}")
@@ -277,9 +325,11 @@ with tempfile.TemporaryDirectory() as tmp:
                        "centred": True},
               "workspace opens full-screen over the map, title centred, with a close button", str(modal))
         check(kept, "Esc closes the workspace and keeps the card selected")
-        check(all(abs(off) <= 2 for off in level), "the centre stays at the middle of the map in view",
+        check(all(abs(off) <= 2 for off in level), "the centre stays at its place in the view",
               f"offsets {level} px")
         check(ranges ==[48, 24, 6, 168, 72], "clicking the centre steps through the time ranges", str(ranges))
+        check(pruned == [1, 0, True, True, 0, 1],
+              "a profile with nothing in the time range is left off; the centre stays", str(pruned))
         check(card_open, "double-clicking a card opens its workspace")
         first = new_chat[0]
         check(first["id"] != "smoke-human" and first["modal"] and first["profile"] == "default" and first["empty"],
@@ -287,6 +337,9 @@ with tempfile.TemporaryDirectory() as tmp:
         check(new_chat[1]["id"] == first["id"], "an unused new session is reused, not duplicated", str(new_chat))
         check(stale == {"believed": "default", "moved": "smoke-second", "open": True, "server": "default", "held": "default"},
               "a card opens in its own profile after another tab switched profile, and keeps it", str(stale))
+        check(fresh is False, "a session the WebUI never opened is imported before it opens", str(fresh))
+        check(later == {"imported": True, "seen": ["load+10", "import+shown"], "stored": "10"},
+              "an imported session opens before its import, in the window set on the map", str(later))
         check(not external, "no request leaves the machine", ", ".join(sorted(set(external))[:4]))
         check(not errors, "no uncaught page errors", " | ".join(errors[:3]))
     finally:

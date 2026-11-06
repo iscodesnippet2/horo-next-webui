@@ -12,10 +12,15 @@ const MM_STATUS = {
   idle: {label: '', color: '#64748b', bg: '#f8fafc'},
 };
 const MM_STORE_KEY = 'horo-mindmap-v1';
+// Read by upstream's sessions.js (horo_overlay.py) for its first transcript window.
+const MM_TAIL_KEY = 'horo-initial-messages';
+const MM_TAILS = [10, 20, 30, 50, 100];
 const MM_POLL_MS = 15000; // Sessions outside this server emit no event.
 const MM_CARD = {w: 480, gap: 14};
 // Profile nodes are at most 220px wide: the floating centre and the cards clear them.
 const MM_TREE = {center: 52, profile: 222, session: 584, width: 844};
+// The centre sits this far down the map in view, a little above the middle, whatever the tree's size.
+const MM_ME_AT = 0.42;
 const MM_RADIAL = {center: 940, profile: 240, session: 620, width: 1880};
 const MM_CLOSE_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
 const MM_PENCIL_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
@@ -184,7 +189,11 @@ function _mmLayout(groups) {
   const columns = tree ? [stacks]
     : [stacks.filter((_g, i) => i % 2 === 0), stacks.filter((_g, i) => i % 2 === 1)];
   const columnHeight = c => c.reduce((h, g) => h + g.height, 0) + Math.max(c.length - 1, 0) * 30;
-  const height = Math.max(420, ...columns.map(columnHeight)) + 80;
+  const view = $('mmMap');
+  // At least the view, so the centre can sit at its place there however small the tree.
+  const height = Math.max(420 + 80, view.clientHeight, ...columns.map(c => columnHeight(c) + 80));
+  // A tree that fits is drawn level with the centre; a taller one fills the canvas.
+  const level = view.clientHeight * MM_ME_AT;
   canvas.style.width = `${geo.width}px`;
   canvas.style.height = `${height}px`;
   svg.setAttribute('width', geo.width);
@@ -195,7 +204,8 @@ function _mmLayout(groups) {
   const anchors = {};
   columns.forEach((column, ci) => {
     const side = tree || ci === 1 ? 1 : -1;
-    let y = (height - columnHeight(column)) / 2;
+    const h = columnHeight(column);
+    let y = Math.min(Math.max(level - h / 2, 40), height - 40 - h);
     column.forEach(g => {
       const px = tree ? geo.profile : cx + side * geo.profile;
       const sx = tree ? geo.session : cx + side * geo.session;
@@ -227,7 +237,6 @@ function _mmLayout(groups) {
   mm.order = columns.flat().flatMap(g => g.visible.map(s => s.id));
   if (mm.showLinks) _mmDrawLinks(svg, canvas, anchors, tree);
   if (!mm.centered) {
-    const view = $('mmMap');
     view.scrollLeft = tree ? 0 : cx - view.clientWidth / 2;
     mm.centered = true;
   }
@@ -240,14 +249,15 @@ function _mmFloatMe() {
   const t = mm.trunk, view = $('mmMap');
   if (!t || !view) return;
   const half = 46;
-  // A map shorter than the view keeps the centre level with its profiles.
-  const shown = Math.min(view.clientHeight, t.height);
-  const cy = Math.min(Math.max(view.scrollTop + shown / 2, half), t.height - half);
+  const cy = Math.min(Math.max(view.scrollTop + view.clientHeight * MM_ME_AT, half), t.height - half);
   _mmPlace($('mmMe'), t.cx - half, cy - half);
   $('mmEdges').querySelectorAll('.mm-trunk').forEach((path, i) => {
     const end = t.ends[i];
     path.setAttribute('d', _mmLine(t.cx, cy, end.px, end.py, t.tree));
   });
+  // Nothing in the range: the centre stays, to step to a wider one, with no branches.
+  const empty = $('mmEmpty');
+  if (!empty.hidden) _mmPlace(empty, t.cx + half + 24, cy - empty.offsetHeight / 2);
 }
 
 function _mmProfileNode(g) {
@@ -476,13 +486,9 @@ async function _mmOpen(s) {
   try {
     // The card's profile is where state.db holds the session; nothing else decides.
     await _mmEnsureProfile(s.profile);
-    if (s.read_only) {
-      // Same as the sidebar: a failed import still opens read-only, unless the
-      // WebUI already filed the session under another profile.
-      await _mmRequest(s, '/api/session/import_cli', {session_id: s.id}).catch(e => {
-        if (_sessionProfileMismatchFromError(e)) throw e;
-      });
-    }
+    // Only a first open waits for the copy out of state.db; later ones open what
+    // the WebUI holds and catch up behind it.
+    if (s.read_only && !s.imported) await _mmImport(s);
     // Never follow the session to another profile: that is the card being wrong.
     await loadSession(s.id, {skipProfileResolve: true});
     if (!S.session || S.session.session_id !== s.id) {
@@ -498,7 +504,31 @@ async function _mmOpen(s) {
     if (mm.modal === s.id) _mmCloseModal();
     const other = _sessionProfileMismatchFromError(e);
     showToast(`無法開啟工作區：${other ? _mmMismatch(s.profile, other.profile) : e.message || e}`, 5000);
+    return;
   }
+  if (s.read_only && s.imported) _mmCatchUp(s);
+}
+
+// Same as the sidebar: a failed import still opens read-only, unless the WebUI
+// already filed the session under another profile.
+function _mmImport(s) {
+  return _mmRequest(s, '/api/session/import_cli', {session_id: s.id}).catch(e => {
+    if (_sessionProfileMismatchFromError(e)) throw e;
+  });
+}
+
+// Messages the CLI added since the WebUI's copy. import_cli answers with the
+// whole transcript, so its answer is not shown: when the copy grew, the session
+// reloads with the usual tail window.
+async function _mmCatchUp(s) {
+  const before = Number(S.session.message_count || 0);
+  const current = () => mm.modal === s.id && S.session && S.session.session_id === s.id && !S.busy;
+  try {
+    await _mmImport(s);
+    const {session} = await _mmRequest(s, `/api/session?session_id=${encodeURIComponent(s.id)}&messages=0&resolve_model=0`);
+    if (!current() || !(Number(session.message_count) > before)) return;
+    await loadSession(s.id, {force: true, keepStaleUntilLoaded: true, skipProfileResolve: true});
+  } catch (_e) { /* What is shown is the WebUI's copy; the next open tries again. */ }
 }
 
 function _mmMismatch(card, owner) {
@@ -613,11 +643,16 @@ function _mmHeader() {
   document.querySelectorAll('[data-mm-hours]').forEach(btn => {
     btn.setAttribute('aria-pressed', String(mm.hours === Number(btn.dataset.mmHours)));
   });
-  const range = `近 ${mm.hours % 24 ? `${mm.hours} 小時` : `${mm.hours / 24} 天`}`;
+  const range = _mmRange();
   $('mmMeHours').textContent = range;
   $('mmMe').setAttribute('aria-label', `時間範圍：${range}，點一下切換`);
 }
 
+function _mmRange() {
+  return `近 ${mm.hours % 24 ? `${mm.hours} 小時` : `${mm.hours / 24} 天`}`;
+}
+
+// A profile with nothing in the time range is left off, older sessions and all.
 function _mmGroups() {
   const sessions = mm.data.sessions;
   return mm.data.profiles
@@ -628,10 +663,10 @@ function _mmGroups() {
       return {
         name, olderCount: older.length, active: all.filter(s => s.status === 'running').length,
         visible: all.filter(s => open || _mmInRange(s)),
-        total: all.length,
+        inRange: all.length - older.length,
       };
     })
-    .filter(g => g.total > 0);
+    .filter(g => g.inRange > 0);
 }
 
 function _mmRender() {
@@ -642,8 +677,8 @@ function _mmRender() {
     ? `無法讀取：${mm.data.errors.map(e => `${e.profile}（${e.error}）`).join('、')}`
     : '';
   const groups = _mmGroups();
+  $('mmEmpty').textContent = `${_mmRange()}沒有有人參與的 session。`;
   $('mmEmpty').hidden = groups.length > 0;
-  $('mmMap').hidden = !groups.length;
   _mmSyncCards(groups.flatMap(g => g.visible));
   _mmLayout(groups);
   _mmHeader();
@@ -749,14 +784,16 @@ function _mmMount() {
         <button type="button" class="mm-pill" data-mm-hours="24">1 天</button>
         <button type="button" class="mm-pill" data-mm-hours="6">6 小時</button>
       </div>
+      <label class="mm-tail" title="會話開啟時先載入的訊息數，聊天頁也適用；更早的往上捲才載入">載入最近
+        <select id="mmTail">${MM_TAILS.map(n => `<option value="${n}">${n}</option>`).join('')}</select> 則</label>
     </header>
     <div class="mm-errors" id="mmFailed" role="alert" hidden></div>
     <div class="mm-errors" id="mmErrors" role="alert" hidden></div>
     <div class="mm-body">
       <section class="mm-left">
-        <div class="mm-empty" id="mmEmpty" hidden>近 7 天沒有有人參與的 session。</div>
         <div class="mm-scroll" id="mmMap">
           <div class="mm-canvas" id="mmCanvas">
+            <div class="mm-node mm-empty" id="mmEmpty" hidden></div>
             <svg class="mm-edges" id="mmEdges" aria-hidden="true"></svg>
             <button type="button" class="mm-node mm-me" id="mmMe" title="點一下切換時間範圍">我<small id="mmMeHours"></small></button>
           </div>
@@ -764,10 +801,23 @@ function _mmMount() {
       </section>
       <aside class="mm-side" id="mmDetail"></aside>
     </div>`;
+  const tail = $('mmTail');
+  tail.value = String(_INITIAL_MSG_LIMIT);
+  tail.onchange = () => {
+    _INITIAL_MSG_LIMIT = Number(tail.value);
+    try {
+      localStorage.setItem(MM_TAIL_KEY, tail.value);
+    } catch (_e) { /* Holds for this page only. */ }
+  };
   let floating = 0;
   const float = () => { cancelAnimationFrame(floating); floating = requestAnimationFrame(_mmFloatMe); };
   $('mmMap').addEventListener('scroll', float, {passive: true});
-  window.addEventListener('resize', float);
+  // The canvas is sized to the view, so a new size lays the map out again.
+  let sizing = 0;
+  window.addEventListener('resize', () => {
+    cancelAnimationFrame(sizing);
+    sizing = requestAnimationFrame(() => { if (mm.active) _mmRender(); });
+  });
   root.addEventListener('click', e => {
     const card = e.target.closest('.mm-card');
     if (card) {

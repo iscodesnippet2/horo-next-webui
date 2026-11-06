@@ -91,7 +91,7 @@ the fix is the same code rebuilt as `.postN` on the version it fixes.
 A panel showing, across every profile, the sessions a person is part of (the
 source allowlist in `overlay/mindmap/horo_overview.py`; cron and kanban are out)
 from the last 7 days: which run, which wait for you, what changed since you
-looked. The page opens on it, over whatever session upstream restores, unless
+looked. A profile with nothing active in the chosen time range is left off. The page opens on the map, over whatever session upstream restores, unless
 `?panel=` names another panel or its tab is hidden. A login bound to one profile, or a server isolated to one, sees only that
 profile's sessions. Selecting a card uses only the overview, so it loads no transcript and
 leaves the active profile alone. The detail card edits the goal, and its progress
@@ -102,8 +102,9 @@ lays upstream's chat view over the map as a full-screen workspace, which does
 switch the active profile; the close button or Esc comes back without repainting
 the map, and keeps the card selected. With a card selected, the arrow keys move
 the selection, Enter opens the workspace and Esc lets go. Double-clicking a card
-opens its workspace too. Clicking the centre node steps through the time ranges; it stays at the middle of the view
-as the map scrolls.
+opens its workspace too. Clicking the centre node steps through the time ranges; it stays a little above the
+middle of the view whatever the size of the tree or the scroll, and stays when
+the range has nothing in it.
 Double-clicking a
 profile (or Enter on it) starts a session there with upstream's New Chat, in that
 profile's last workspace, and opens it as the workspace; an empty one the map
@@ -118,6 +119,13 @@ to show in this one: opening a card asks the server which profile is active and
 switches for real, and coming back to a tab with a workspace open switches back
 to the workspace's profile. Two WebUI servers on one host share the cookie too;
 give each its own `HERMES_WEBUI_PROFILE_COOKIE_NAME`.
+
+A workspace shows the last messages of the session, like the chat view; older
+ones load as you scroll up. How many is set on the map (10 to 100, 30 by
+default), kept per browser, and applies to the chat view too. Only the first
+open of a CLI session waits to copy it out of `state.db`; later opens show the
+WebUI's copy at once and bring it up to date in the background, reloading only
+if the CLI added messages.
 
 A card's goal is the session's title, which a person can edit; edits live in
 `horo_goals.json` in the WebUI state directory, so `state.db` stays read-only and

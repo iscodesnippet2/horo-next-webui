@@ -254,6 +254,15 @@ edit("static/sessions.js",
      "    if(typeof renderSessionList==='function') await renderSessionList();\n",
      "    if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);\n"
      "    if(typeof renderSessionList==='function') void renderSessionList();\n")
+# The first transcript window, chosen on the mind map and kept per browser
+# (MM_TAIL_KEY in mindmap.js); upstream's 30 otherwise.
+edit("static/sessions.js", "const _INITIAL_MSG_LIMIT = 30;\n",
+     "let _INITIAL_MSG_LIMIT = (() => {\n"
+     "  try {\n"
+     "    const n = Number(localStorage.getItem('horo-initial-messages'));\n"
+     "    return [10, 20, 30, 50, 100].includes(n) ? n : 30;\n"
+     "  } catch (_e) { return 30; }\n"
+     "})();\n")
 # A page load opens on the mind map, over whatever session it restores, unless
 # ?panel= names a panel or the mind map tab is hidden.
 edit("static/boot.js",

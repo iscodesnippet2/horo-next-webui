@@ -290,6 +290,8 @@ def _read_profile(name: str, home: Path, cutoff: float, now: float, live: dict, 
                            for m in reversed(recent)],
                 "pinned": bool(state.get("pinned")),
                 "read_only": row["source"] != "webui",
+                # The WebUI holds a copy: opening needs no import first.
+                "imported": sid in live,
                 "stream_id": state.get("active_stream_id") or None,
             })
             parent = row["parent_session_id"]
@@ -324,7 +326,7 @@ def _sidecar_session(sid: str, state: dict, now: float, attention_of) -> dict:
         "status": status, "last_activity_at": state.get("updated_at") or now, "goal": _goal_of(name, sid) or title,
         "progress": "—", "blocker": _blocker(status, attention, None), "events": [],
         "pinned": bool(state.get("pinned")),
-        "read_only": False, "stream_id": state.get("active_stream_id") or None,
+        "read_only": False, "imported": True, "stream_id": state.get("active_stream_id") or None,
     }
 
 

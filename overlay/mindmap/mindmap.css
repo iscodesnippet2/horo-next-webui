@@ -20,6 +20,8 @@ main.main.showing-mindmap > #mainChat{display:none !important;}
 .mm-hours .mm-pill{border-radius:0;margin-left:-1px;}
 .mm-hours .mm-pill:first-child{border-radius:999px 0 0 999px;margin-left:0;}
 .mm-hours .mm-pill:last-child{border-radius:0 999px 999px 0;}
+.mm-tail{display:flex;align-items:center;gap:6px;white-space:nowrap;font-size:13px;color:var(--muted);}
+.mm-tail select{min-height:36px;padding:0 10px;border:1px solid var(--border);border-radius:999px;background:transparent;color:var(--text);font:inherit;}
 .mm-pill[aria-pressed="true"]{background:var(--text);border-color:var(--text);color:var(--bg);}
 .mm-btn{min-height:44px;border-radius:8px;}
 .mm-errors{padding:10px 20px;background:#fef2f2;color:#991b1b;font-size:13px;border-bottom:1px solid #fecaca;}
@@ -106,5 +108,5 @@ body.mm-modal.mm-loading main.main.showing-mindmap > #mainChat{visibility:hidden
 }
 .mm-modal-heading strong{max-width:100%;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 #mmModalBar .mm-close{flex:none;position:absolute;right:12px;top:50%;transform:translateY(-50%);}
-.mm-empty{padding:40px 20px;text-align:center;color:var(--muted);font-size:14px;}
+.mm-empty{color:var(--muted);font-size:14px;white-space:nowrap;}
 @media (max-width:900px){.mm-body{flex-direction:column;}.mm-side{flex:none;width:100%;}}
