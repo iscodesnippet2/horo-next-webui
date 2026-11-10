@@ -215,10 +215,21 @@ with tempfile.TemporaryDirectory() as tmp:
               view.scrollTop = 0;
               return out;
             }""")
-            ranges = page.evaluate("""() => [0, 1, 2, 3, 4].map(() => {
-              document.getElementById('mmMe').click();
-              return mm.hours;
-            })""")
+            # The centre's halves: left lengthens, right shortens, both stop at the ends;
+            # the choice is stored and read back on the next load.
+            steps = page.evaluate("""() => {
+              const longer = document.getElementById('mmMeLonger'), shorter = document.getElementById('mmMeShorter');
+              const out = [];
+              longer.click(); out.push(mm.hours, longer.disabled);
+              longer.click(); out.push(mm.hours);
+              shorter.click(); shorter.click(); out.push(mm.hours);
+              const stored = JSON.parse(localStorage.getItem(MM_STORE_KEY)).hours;
+              mm.hours = 6; _mmLoadStore(); out.push(stored, mm.hours);
+              ['mmMeShorter', 'mmMeShorter', 'mmMeShorter', 'mmMeShorter'].forEach(id => document.getElementById(id).click());
+              out.push(mm.hours, shorter.disabled);
+              document.querySelector('[data-mm-hours="72"]').click();
+              return out;
+            }""")
             # A profile whose only session is older than the range is left off the map.
             pruned = page.evaluate("""() => {
               const s = mm.data.sessions.find(s => s.id === 'smoke-human');
@@ -327,7 +338,7 @@ with tempfile.TemporaryDirectory() as tmp:
         check(kept, "Esc closes the workspace and keeps the card selected")
         check(all(abs(off) <= 2 for off in level), "the centre stays at its place in the view",
               f"offsets {level} px")
-        check(ranges ==[48, 24, 6, 168, 72], "clicking the centre steps through the time ranges", str(ranges))
+        check(steps == [168, True, 168, 48, 48, 48, 6, True], "the centre's halves step the range, stop at the ends, and it is kept", str(steps))
         check(pruned == [1, 0, True, True, 0, 1],
               "a profile with nothing in the time range is left off; the centre stays", str(pruned))
         check(card_open, "double-clicking a card opens its workspace")

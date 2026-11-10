@@ -35,9 +35,15 @@ main.main.showing-mindmap > #mainChat{display:none !important;}
 .mm-node{position:absolute;left:0;top:0;transition:opacity .2s;}
 .mm-me{width:92px;height:92px;border-radius:50%;background:#0f172a;color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;font-size:18px;font-weight:700;}
 .mm-me small{font-size:11px;font-weight:400;color:#cbd5e1;}
-.mm-me{border:0;padding:0;font-family:inherit;cursor:pointer;user-select:none;}
+.mm-me{user-select:none;overflow:hidden;}
+.mm-me-core{position:relative;display:flex;flex-direction:column;align-items:center;gap:2px;pointer-events:none;}
+.mm-me-step{position:absolute;top:0;bottom:0;width:50%;display:flex;align-items:center;border:0;padding:0 6px;background:none;color:#cbd5e1;font-family:inherit;font-size:18px;cursor:pointer;}
+.mm-me-longer{left:0;justify-content:flex-start;}
+.mm-me-shorter{right:0;justify-content:flex-end;}
+.mm-me-step:hover:not(:disabled){color:#fff;background:rgba(255,255,255,.14);}
+.mm-me-step:disabled{color:rgba(203,213,225,.25);cursor:default;}
 .mm-me:hover{box-shadow:0 0 0 3px var(--accent,#2563eb);}
-.mm-me:focus-visible{outline:3px solid var(--text);outline-offset:2px;}
+.mm-me-step:focus-visible{outline:none;background:rgba(255,255,255,.22);color:#fff;}
 .mm-profile{display:flex;flex-direction:column;align-items:center;gap:6px;}
 .mm-profile-pill{display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px 14px;min-width:132px;background:var(--bg);border:2px solid var(--text);border-radius:999px;font-size:15px;font-weight:700;}
 .mm-profile-pill small{font-size:11px;font-weight:400;color:var(--muted);}

@@ -21,6 +21,8 @@ const MM_CARD = {w: 480, gap: 14};
 const MM_TREE = {center: 52, profile: 222, session: 584, width: 844};
 // The centre sits this far down the map in view, a little above the middle, whatever the tree's size.
 const MM_ME_AT = 0.42;
+// Longest first: the centre's left arrow lengthens the range, the right one shortens it.
+const MM_HOURS = [168, 72, 48, 24, 6];
 const MM_RADIAL = {center: 940, profile: 240, session: 620, width: 1880};
 const MM_CLOSE_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
 const MM_PENCIL_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
@@ -38,6 +40,7 @@ function _mmLoadStore() {
     const stored = JSON.parse(localStorage.getItem(MM_STORE_KEY) || '{}');
     mm.seen = stored.seen || {};
     mm.baseline = stored.baseline || 0;
+    if (MM_HOURS.includes(stored.hours)) mm.hours = stored.hours;
   } catch (_e) { /* Unread markers are a convenience; start empty. */ }
   // A first visit has nothing to compare with: everything flagged would mean nothing.
   if (!mm.baseline) {
@@ -48,7 +51,7 @@ function _mmLoadStore() {
 
 function _mmSaveStore() {
   try {
-    localStorage.setItem(MM_STORE_KEY, JSON.stringify({seen: mm.seen, baseline: mm.baseline}));
+    localStorage.setItem(MM_STORE_KEY, JSON.stringify({seen: mm.seen, baseline: mm.baseline, hours: mm.hours}));
   } catch (_e) { /* Private window or blocked storage. */ }
 }
 
@@ -645,7 +648,17 @@ function _mmHeader() {
   });
   const range = _mmRange();
   $('mmMeHours').textContent = range;
-  $('mmMe').setAttribute('aria-label', `時間範圍：${range}，點一下切換`);
+  $('mmMe').setAttribute('aria-label', `時間範圍：${range}`);
+  const at = MM_HOURS.indexOf(mm.hours);
+  $('mmMeLonger').disabled = at <= 0;
+  $('mmMeShorter').disabled = at >= MM_HOURS.length - 1;
+}
+
+// The range is kept per browser, so a reload shows what was last chosen.
+function _mmSetHours(hours) {
+  mm.hours = hours;
+  _mmSaveStore();
+  _mmRender();
 }
 
 function _mmRange() {
@@ -795,7 +808,11 @@ function _mmMount() {
           <div class="mm-canvas" id="mmCanvas">
             <div class="mm-node mm-empty" id="mmEmpty" hidden></div>
             <svg class="mm-edges" id="mmEdges" aria-hidden="true"></svg>
-            <button type="button" class="mm-node mm-me" id="mmMe" title="點一下切換時間範圍">我<small id="mmMeHours"></small></button>
+            <div class="mm-node mm-me" id="mmMe" role="group" aria-label="時間範圍">
+              <button type="button" class="mm-me-step mm-me-longer" id="mmMeLonger" data-mm-step="-1" title="拉長時間範圍" aria-label="拉長時間範圍">‹</button>
+              <button type="button" class="mm-me-step mm-me-shorter" id="mmMeShorter" data-mm-step="1" title="縮短時間範圍" aria-label="縮短時間範圍">›</button>
+              <span class="mm-me-core" aria-hidden="true">我<small id="mmMeHours"></small></span>
+            </div>
           </div>
         </div>
       </section>
@@ -831,12 +848,13 @@ function _mmMount() {
     const layout = e.target.closest('[data-mm-layout]');
     if (layout) { mm.layout = layout.dataset.mmLayout; mm.centered = false; return _mmRender(); }
     const hours = e.target.closest('[data-mm-hours]');
-    if (hours) { mm.hours = Number(hours.dataset.mmHours); return _mmRender(); }
-    // The centre steps through the same ranges as the buttons, wrapping round.
-    if (e.target.closest('#mmMe')) {
-      const ranges = [...document.querySelectorAll('[data-mm-hours]')].map(b => Number(b.dataset.mmHours));
-      mm.hours = ranges[(ranges.indexOf(mm.hours) + 1) % ranges.length];
-      return _mmRender();
+    if (hours) return _mmSetHours(Number(hours.dataset.mmHours));
+    // Each half of the centre steps one range longer (left) or shorter (right),
+    // stopping at the ends.
+    const step = e.target.closest('[data-mm-step]');
+    if (step) {
+      const at = MM_HOURS.indexOf(mm.hours) + Number(step.dataset.mmStep);
+      return _mmSetHours(MM_HOURS[Math.min(Math.max(at, 0), MM_HOURS.length - 1)]);
     }
     // Clicking anywhere that is not a control lets go of the selection.
     if (!e.target.closest('button,input,textarea,select,label,a,#mmDetail')) _mmDeselect();

@@ -102,7 +102,9 @@ lays upstream's chat view over the map as a full-screen workspace, which does
 switch the active profile; the close button or Esc comes back without repainting
 the map, and keeps the card selected. With a card selected, the arrow keys move
 the selection, Enter opens the workspace and Esc lets go. Double-clicking a card
-opens its workspace too. Clicking the centre node steps through the time ranges; it stays a little above the
+opens its workspace too. Clicking the left half of the centre node makes the
+time range longer, the right half shorter; the range is
+kept per browser, so a reload shows the last one chosen. The centre stays a little above the
 middle of the view whatever the size of the tree or the scroll, and stays when
 the range has nothing in it.
 Double-clicking a
