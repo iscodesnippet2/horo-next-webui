@@ -17,7 +17,7 @@ release is not a clean one. The public API serves a subset of what Sonatype's
 commercial products know, so a clean result narrows the gap with the mirror; it
 cannot close it.
 
-Run daily against the latest release by .github/workflows/rescan.yml.
+Run against the latest release, on demand, by .github/workflows/rescan.yml.
 """
 from __future__ import annotations
 

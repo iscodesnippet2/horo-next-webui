@@ -110,7 +110,7 @@ jobs:
 
       # The enterprise mirror is guarded by Sonatype. Every shipped component —
       # Python and npm, bundled ones included — must be clean in OSV and in
-      # Sonatype's public data. The same check reruns daily (rescan.yml).
+      # Sonatype's public data. The same check reruns on demand (rescan.yml).
       - name: Audit every shipped component against OSV and Sonatype
         env:
           SONATYPE_GUIDE_TOKEN: ${{ secrets.SONATYPE_GUIDE_TOKEN }}

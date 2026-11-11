@@ -45,8 +45,9 @@ these fails:
   tested: real release files are corrupted one way at a time, and each
   corruption must be caught by the check responsible for it.
 
-A clean audit holds on the day it runs. The daily `rescan` workflow audits the
-latest release again and opens an issue on a new advisory.
+A clean audit holds on the day it runs. The `rescan` workflow, run by hand, audits
+the latest release again and opens an issue on a new advisory. It is not
+scheduled: each run spends Sonatype Guide credits, which are limited.
 
 ## What every release publishes
 

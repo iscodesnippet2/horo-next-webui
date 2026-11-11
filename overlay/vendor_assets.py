@@ -80,7 +80,7 @@ REGISTRY = os.environ.get("HORO_NPM_REGISTRY", "https://registry.npmjs.org")
 
 failures: list[str] = []
 notes: list[str] = []
-# Every npm component the wheel ships, for audit_shipped.py and the daily
+# Every npm component the wheel ships, for audit_shipped.py and the
 # rescan: (name, version) → how it ships.
 shipped: dict[tuple[str, str], set[str]] = {}
 

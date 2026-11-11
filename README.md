@@ -38,7 +38,7 @@ committed here**. The default branch, `horo`, holds only the tooling:
 | `overlay/browser_smoke.py` | Runs upstream's Mermaid, KaTeX, PDF.js, Prism and xterm render paths in Chromium from the installed wheel, offline |
 | `overlay/tests/` | Gate tests against fake services, and mutation tests on real release files |
 | `overlay/sonatype_lookup.py` | Lists Sonatype's findings for every version of a package (via the `sonatype-lookup` workflow), to pick a replacement |
-| `.github/workflows/rescan.yml` | Re-audits the latest release daily; opens an issue on a new advisory |
+| `.github/workflows/rescan.yml` | Re-audits the latest release when run by hand; opens an issue on a new advisory |
 | `airgap/probe.py` | Run on an air-gapped machine: which dependencies the mirror serves |
 | `pypi/README.md` | The project page shown on PyPI |
 | `.github/workflows/release.yml` | Tag → overlay → floors → front end → SBOM → wheel → audit → verify → TestPyPI → PyPI |
@@ -82,8 +82,9 @@ any finding — or a Sonatype check that could not run — holds the release.
 Sonatype's public API (Sonatype Guide) serves a subset of its commercial data;
 a clean result narrows the gap with the mirror, it cannot close it.
 
-**A clean audit is a snapshot.** It holds on the day of the build. The daily
-rescan checks the latest release again and opens an issue on a new advisory;
+**A clean audit is a snapshot.** It holds on the day of the build. The rescan
+workflow, run by hand (Sonatype Guide credits are limited, so it is not
+scheduled), checks the latest release again and opens an issue on a new advisory;
 the fix is the same code rebuilt as `.postN` on the version it fixes.
 
 ## Agent mind map
