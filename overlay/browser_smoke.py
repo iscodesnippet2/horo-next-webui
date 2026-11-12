@@ -71,6 +71,8 @@ PROBE = r"""async () => {
   out.mermaidVersion = typeof mermaid !== 'undefined' && mermaid.version ? String(mermaid.version) : '';
   out.pdfjsVersion = window._pdfjsLib ? window._pdfjsLib.version : '';
   out.katexVersion = typeof katex !== 'undefined' ? katex.version : '';
+  // Left in the body, it squeezes the page's layout for the checks after it.
+  c.remove();
   return out;
 }"""
 
@@ -190,11 +192,17 @@ with tempfile.TemporaryDirectory() as tmp:
             page.wait_for_function("() => document.body.classList.contains('mm-modal')"
                                    " && !document.body.classList.contains('mm-loading')", timeout=15000)
             modal = page.evaluate("""() => ({
-              full: document.getElementById('mainChat').getBoundingClientRect().width === innerWidth,
+              // Gaps to the map column's inside edges: left, right, bottom.
+              full: (m => { const b = m.getBoundingClientRect(), c = document.getElementById('mainChat').getBoundingClientRect();
+                return [c.left - b.left - m.clientLeft, b.left + m.clientLeft + m.clientWidth - c.right,
+                        b.top + m.clientTop + m.clientHeight - c.bottom].map(Math.round); })(
+                document.querySelector('main.main')),
+              rail: !document.querySelector('.rail').inert && document.querySelector('.rail').getBoundingClientRect().width > 0,
               session: S.session.session_id === mm.modal, behind: document.getElementById('mainMindmap').inert,
               panel: _currentPanel, close: document.getElementById('mmModalClose').getAttribute('aria-label'),
-              centred: (h => Math.abs(h.left + h.width / 2 - innerWidth / 2) < 2)(
-                document.querySelector('.mm-modal-heading').getBoundingClientRect()),
+              centred: ((h, b) => Math.abs(h.left + h.width / 2 - (b.left + b.width / 2)) < 2)(
+                document.querySelector('.mm-modal-heading').getBoundingClientRect(),
+                document.getElementById('mmModalBar').getBoundingClientRect()),
             })""")
             page.keyboard.press("Escape")
             page.wait_for_function("() => !document.body.classList.contains('mm-modal')", timeout=5000)
@@ -332,9 +340,9 @@ with tempfile.TemporaryDirectory() as tmp:
         check(mindmap["nav"] == ["mindmap", "chat"], "mind map comes first in the navigation", str(mindmap["nav"]))
         check(mindmap["open"] == "開啟工作區", "the progress line opens the workspace", mindmap["open"])
         check(refused == 403, "an unknown profile in X-Horo-Profile is refused", str(refused))
-        check(modal == {"full": True, "session": True, "behind": True, "panel": "mindmap", "close": "關閉工作區",
-                       "centred": True},
-              "workspace opens full-screen over the map, title centred, with a close button", str(modal))
+        check(modal == {"full": [0, 0, 0], "rail": True, "session": True, "behind": True, "panel": "mindmap",
+                       "close": "關閉工作區", "centred": True},
+              "workspace covers the map, leaves the rail usable, title centred, with a close button", str(modal))
         check(kept, "Esc closes the workspace and keeps the card selected")
         check(all(abs(off) <= 2 for off in level), "the centre stays at its place in the view",
               f"offsets {level} px")

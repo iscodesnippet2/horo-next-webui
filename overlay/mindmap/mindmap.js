@@ -26,7 +26,8 @@ const MM_HOURS = [168, 72, 48, 24, 6];
 const MM_RADIAL = {center: 940, profile: 240, session: 620, width: 1880};
 const MM_CLOSE_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
 const MM_PENCIL_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
-const MM_BEHIND_MODAL = ['.rail', '.sidebar', '.app-titlebar', '.rightpanel', '#mainMindmap'];
+// The rail stays usable: every tab in it leaves the map, which closes the workspace.
+const MM_BEHIND_MODAL = ['.sidebar', '.app-titlebar', '.rightpanel', '#mainMindmap'];
 
 const mm = {
   data: null, version: '', mounted: false, active: false, source: null, poll: null, debounce: null, inFlight: false,
@@ -461,7 +462,8 @@ function _mmOpenBar(s) {
   if (!bar) {
     bar = _mmEl('div');
     bar.id = 'mmModalBar';
-    document.body.append(bar);
+    // Inside the map's own column, so the workspace covers the map and not the rail.
+    document.querySelector('main.main').append(bar);
   }
   _mmModalBar(s);
   document.body.classList.add('mm-loading');
@@ -903,6 +905,14 @@ document.addEventListener('DOMContentLoaded', () => {
     return result;
   };
 });
+
+// The map's own tab, pressed in a workspace, goes back to the map. Upstream's
+// handler would fold the sidebar instead, as for any tab pressed twice.
+document.addEventListener('click', e => {
+  if (!mm.modal || !e.target.closest('.rail .nav-tab[data-panel="mindmap"]')) return;
+  e.stopPropagation();
+  _mmCloseModal();
+}, true);
 
 window.addEventListener('focus', _mmHoldProfile);
 document.addEventListener('visibilitychange', _mmHoldProfile);

@@ -101,6 +101,11 @@ main.main.showing-mindmap > #mainChat{display:none !important;}
 body.mm-modal #mmModalBar{position:fixed;top:0;left:0;right:0;height:60px;box-sizing:border-box;z-index:150;display:flex;align-items:center;justify-content:center;padding:0 150px;background:var(--bg);border-bottom:1px solid var(--border);color:var(--text);font-family:var(--font-ui);}
 body.mm-modal main.main.showing-mindmap > #mainChat{display:flex !important;position:fixed;inset:60px 0 0 0;z-index:150;}
 body.mm-modal.mm-loading main.main.showing-mindmap > #mainChat{visibility:hidden;}
+/* Beside the rail, the workspace covers the map's column only, so the rail stays in reach. */
+@media (min-width:641px){
+  body.mm-modal main.main.showing-mindmap{position:relative;}
+  body.mm-modal #mmModalBar,body.mm-modal main.main.showing-mindmap > #mainChat{position:absolute;}
+}
 /* Title centred, its time just after it; the close button keeps the right edge. */
 .mm-modal-centre{position:relative;display:flex;min-width:0;max-width:100%;}
 .mm-modal-heading{display:flex;flex-direction:column;align-items:center;text-align:center;min-width:0;}
