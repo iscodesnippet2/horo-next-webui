@@ -33,6 +33,8 @@ committed here**. The default branch, `horo`, holds only the tooling:
 | `overlay/sonatype.py` | Sonatype Guide client, shared by every step that consults it |
 | `overlay/sbom.py` | CycloneDX 1.5 SBOM and third-party notices; embeds the SBOM in the wheel (PEP 770) |
 | `overlay/audit_shipped.py` | Checks every SBOM component against OSV **and Sonatype**; needs the `SONATYPE_GUIDE_TOKEN` secret |
+| `overlay/source_dist.py` | Adds `horo/` and a MANIFEST to the tree for the sdist; checks the sdist holds what the wheel installs, nothing third-party beyond it, and builds the same wheel offline |
+| `overlay/DEVELOPING.md` | Shipped in the sdist: developing on an air-gapped machine |
 | `overlay/verify_release.py` | Checks the wheel, SBOM, notices, hashes and audit against each other |
 | `overlay/verify_wheel.py` | Installs the wheel into a clean venv, starts the server, fetches every vendored asset |
 | `overlay/browser_smoke.py` | Runs upstream's Mermaid, KaTeX, PDF.js, Prism and xterm render paths in Chromium from the installed wheel, offline |
@@ -41,7 +43,7 @@ committed here**. The default branch, `horo`, holds only the tooling:
 | `.github/workflows/rescan.yml` | Re-audits the latest release when run by hand; opens an issue on a new advisory |
 | `airgap/probe.py` | Run on an air-gapped machine: which dependencies the mirror serves |
 | `pypi/README.md` | The project page shown on PyPI |
-| `.github/workflows/release.yml` | Tag → overlay → floors → front end → SBOM → wheel → audit → verify → TestPyPI → PyPI |
+| `.github/workflows/release.yml` | Tag → overlay → floors → front end → SBOM → sdist → wheel → audit → verify → TestPyPI → PyPI |
 
 Security policy: [SECURITY.md](SECURITY.md). For a reviewer: [docs/security-review.md](docs/security-review.md).
 
@@ -73,6 +75,13 @@ resolved set is audited.
 
 **Fourteen days, no exceptions.** Nothing younger than 14 days ships. When the
 only fix for an advisory is inside the cooldown, the release waits for it.
+
+**The sdist is the wheel's source.** Each release ships the overlaid tree as an
+sdist, with upstream's tests, so an air-gapped machine can keep developing on
+it; new upstream code reaches that machine only as a new release here. A
+release holds unless every file the wheel installs is in the sdist byte for
+byte, the sdist carries no script, lockfile or remote page the audit did not
+cover, and it builds the same wheel with no network and no build isolation.
 
 **Verify by installing, not by building.** Upstream's own wheel builds and
 uploads cleanly and cannot start. Every release is installed into a clean venv
@@ -180,7 +189,9 @@ git clone --depth 1 --branch exp-v0.52.416 https://github.com/nesquena/hermes-we
 python overlay/horo_overlay.py upstream 0.52.416
 python overlay/security_bump.py upstream --notes release-notes.md
 HORO_NPM="npx -y npm@11.21.0" python overlay/vendor_assets.py upstream --notes release-notes.md
-(cd upstream && uv build --wheel --out-dir ../dist)
+python overlay/source_dist.py prepare upstream 0.52.416 exp-v0.52.416
+(cd upstream && uv build --out-dir ../dist)
+python overlay/source_dist.py verify dist/horo_next_webui-0.52.416.tar.gz dist/horo_next_webui-0.52.416-py3-none-any.whl 0.52.416
 python overlay/verify_wheel.py dist/horo_next_webui-0.52.416-py3-none-any.whl 3.12 0.52.416
 python -m unittest discover -s overlay/tests -p 'test_*.py'
 ```

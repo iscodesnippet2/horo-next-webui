@@ -1,7 +1,8 @@
 # Build one upstream Hermes WebUI release as horo-next-webui and publish it.
 #
 #   upstream tag  ──overlay──▶  Python floors  ──▶  front-end libraries
-#   ──▶  pinned dependencies  ──▶  SBOM + notices  ──▶  wheel  ──▶  advisory audit
+#   ──▶  pinned dependencies  ──▶  SBOM + notices  ──▶  sdist  ──▶  wheel built from it
+#   ──▶  advisory audit
 #   ──▶  verify on every supported Python  ──▶  TestPyPI  ──▶  (approval)
 #   ──▶  PyPI + GitHub release
 #
@@ -99,9 +100,17 @@ jobs:
             --requirements "requirements-${{ inputs.version }}.txt" --out horo-next-webui.cdx.json
           cp upstream/THIRD_PARTY_LICENSES THIRD_PARTY_LICENSES.txt
 
-      - name: Build the wheel
+      # The sdist is for developing offline: the same tree plus upstream's tests,
+      # where it came from, and the overlay that made it (overlay/DEVELOPING.md).
+      - name: Prepare the source distribution
+        env:
+          HORO_OVERLAY_COMMIT: ${{ github.sha }}
+        run: uv run python overlay/source_dist.py prepare upstream "${{ inputs.version }}" "${{ inputs.upstream_tag }}"
+
+      # Without --wheel, uv builds the sdist and then the wheel from it.
+      - name: Build the sdist and the wheel
         working-directory: upstream
-        run: uv build --wheel --out-dir ../dist
+        run: uv build --out-dir ../dist
 
       - name: Embed the SBOM in the wheel (PEP 770)
         run: |
@@ -126,6 +135,14 @@ jobs:
           files="dist/horo_next_webui-$v-py3-none-any.whl horo-next-webui-$v.cdx.json THIRD_PARTY_LICENSES.txt requirements-$v.txt requirements-$v-hashes.txt audit-$v.json $v"
           uv run --with 'cyclonedx-python-lib[json-validation]==11.12.0' python overlay/verify_release.py $files
           uv run --with 'cyclonedx-python-lib[json-validation]==11.12.0' python overlay/tests/mutate_release.py $files
+
+      # The sdist holds what the wheel installs and nothing third-party beyond it,
+      # and builds the same wheel offline.
+      - name: Check the source distribution against the wheel
+        run: |
+          v="${{ inputs.version }}"
+          uv run python overlay/source_dist.py verify "dist/horo_next_webui-$v.tar.gz" \
+            "dist/horo_next_webui-$v-py3-none-any.whl" "$v"
 
       - id: meta
         run: echo "pythons=$(jq -c .pythons upstream/horo-build.json)" >> "$GITHUB_OUTPUT"
@@ -223,7 +240,7 @@ jobs:
             --repo "${{ github.repository }}" \
             --title "horo-next-webui ${{ inputs.version }} (upstream ${{ inputs.upstream_tag }})" \
             --notes-file release-notes.md \
-            dist/*.whl \
+            dist/*.whl dist/*.tar.gz \
             "requirements-${{ inputs.version }}.txt" \
             "requirements-${{ inputs.version }}-hashes.txt" \
             "horo-next-webui-${{ inputs.version }}.cdx.json" \

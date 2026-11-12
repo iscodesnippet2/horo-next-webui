@@ -124,8 +124,9 @@ def cli_row(fetch_rows, session_id: str, all_profiles: bool) -> dict | None:
     session looks it up three times in a row: up to a second in all on 3,900
     sessions. So only the first lookup of a profile waits; later ones answer from
     the index and refresh it behind the scenes once it is CLI_INDEX_SECONDS old.
-    A session too new to be listed still reaches upstream's direct lookup, which
-    follows this call.
+    A session the index does not have may be newer than it, so a miss rebuilds it
+    first, as upstream's scan would have found it; upstream's direct lookup, which
+    follows this call, classifies a messaging session differently.
     """
     key = (get_active_profile_name(), all_profiles)
     with _cli_index_lock:
@@ -134,11 +135,14 @@ def cli_row(fetch_rows, session_id: str, all_profiles: bool) -> dict | None:
                    and key not in _cli_refreshing)
         if refresh:
             _cli_refreshing.add(key)
-    if index is None:
+    fresh = index is None
+    if fresh:
         index = _build_cli_index(key, fetch_rows)
     elif refresh:
         threading.Thread(target=_refresh_cli_index, args=(key, fetch_rows), daemon=True).start()
     row = index.get(session_id)
+    if row is None and not fresh:
+        row = _build_cli_index(key, fetch_rows).get(session_id)
     return dict(row) if row else None
 
 
@@ -347,6 +351,17 @@ def _sidecar_only(known: set, profiles: list, cutoff: float, now: float, live: d
     return sessions, links
 
 
+def requested_profile(handler) -> str:
+    """The ``X-Horo-Profile`` header, or "" without one.
+
+    Only a string counts: upstream's tests drive the routes with stand-in
+    handlers that have no headers, or a mock whose every attribute is truthy.
+    """
+    headers = getattr(handler, "headers", None)
+    value = headers.get(PROFILE_HEADER) if headers is not None else None
+    return value.strip() if isinstance(value, str) else ""
+
+
 def profile_override(handler) -> str | None:
     """Scope this request to the ``X-Horo-Profile`` profile; return why not, if refused.
 
@@ -354,7 +369,7 @@ def profile_override(handler) -> str | None:
     client cannot already do with /api/profile/switch, and refuses what that
     route refuses: a profile bound to the login, or isolated single-profile mode.
     """
-    name = handler.headers.get(PROFILE_HEADER, "").strip()
+    name = requested_profile(handler)
     if name == get_active_profile_name():
         return None
     if _is_isolated_profile_mode():

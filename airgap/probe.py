@@ -17,6 +17,10 @@ that do not apply to this OS or Python are reported as skipped, not missing.
 Each package is tried as a wheel first. If no wheel is available it is tried
 again as a source distribution, which would need a compiler to install.
 
+With --develop it also checks what developing offline needs (overlay/DEVELOPING.md
+in the sdist): horo-next-webui's source distribution, which pip prepares the way
+a build would, and setuptools 80 or later.
+
 Writes airgap-probe-report.json next to the requirements file. Bring that file
 back to analyse the results. Credentials in index URLs are removed from it.
 
@@ -111,25 +115,40 @@ def download(req: str, dest: str, extra: list[str], binary_only: bool, timeout: 
         return 124, "timed out"
 
 
+def reason(text: str) -> tuple[str, str]:
+    if UNREACHABLE.search(text):
+        return "unreachable", "mirror could not be reached"
+    if TLS.search(text):
+        return "tls", "TLS error — check pip's cert / trusted-host settings"
+    if BLOCKED.search(text):
+        return "blocked", "refused by the mirror (HTTP 403, usually a security policy)"
+    if NOT_FOUND.search(text):
+        return "missing", "not on the mirror (HTTP 404)"
+    if NO_MATCH.search(text):
+        return "missing", "no matching file on the mirror"
+    return "error", text.strip().splitlines()[-1][:300] if text.strip() else "unknown error"
+
+
+def classify_source(req: str, dest: str, extra: list[str], timeout: int) -> dict:
+    """The source distribution only: pip downloads it and prepares its metadata,
+    which fetches its build backend from the mirror as a real build would."""
+    result = {"requirement": f"{req} (source)", "package": name_of(req)}
+    # This package only: :all: would make its build backend a source build too.
+    code, out = download(req, dest, [*extra, "--no-binary", name_of(req)], binary_only=False, timeout=timeout)
+    if code == 0:
+        result["status"] = "ok"
+    else:
+        status, detail = reason(out)
+        result.update(status=status, detail=f"source distribution: {detail}")
+    return result
+
+
 def classify(req: str, dest: str, extra: list[str], timeout: int) -> dict:
     result = {"requirement": req, "package": name_of(req)}
     code, out = download(req, dest, extra, binary_only=True, timeout=timeout)
     if code == 0:
         result["status"] = "skipped" if SKIPPED.search(out) else "ok"
         return result
-
-    def reason(text: str) -> tuple[str, str]:
-        if UNREACHABLE.search(text):
-            return "unreachable", "mirror could not be reached"
-        if TLS.search(text):
-            return "tls", "TLS error — check pip's cert / trusted-host settings"
-        if BLOCKED.search(text):
-            return "blocked", "refused by the mirror (HTTP 403, usually a security policy)"
-        if NOT_FOUND.search(text):
-            return "missing", "not on the mirror (HTTP 404)"
-        if NO_MATCH.search(text):
-            return "missing", "no matching file on the mirror"
-        return "error", text.strip().splitlines()[-1][:300] if text.strip() else "unknown error"
 
     status, detail = reason(out)
     versions = FROM_VERSIONS.search(out)
@@ -170,6 +189,8 @@ def main() -> int:
     ap.add_argument("--workers", type=int, default=4, help="parallel downloads (default 4)")
     ap.add_argument("--timeout", type=int, default=300, help="seconds per package (default 300)")
     ap.add_argument("--report", type=Path, help="report path (default: next to the requirements file)")
+    ap.add_argument("--develop", action="store_true",
+                    help="also check what developing offline needs: horo-next-webui's sdist and setuptools")
     ap.add_argument("--no-self", action="store_true",
                     help="do not probe horo-next-webui itself — for checking the dependencies "
                          "before a version has been published")
@@ -181,9 +202,14 @@ def main() -> int:
         return 1
 
     # horo-next-webui itself must come from the mirror too.
-    version = re.search(r"requirements-(\d+\.\d+\.\d+(?:\.post\d+)?)", args.requirements.name)
+    # X.Y.Z, X.Y.Z.N for a horo revision, either with .postN.
+    version = re.search(r"requirements-(\d+\.\d+\.\d+(?:\.\d+)?(?:\.post\d+)?)(?:-hashes)?\.txt$",
+                        args.requirements.name)
     if version and not args.no_self:
         reqs.insert(0, f"horo-next-webui=={version.group(1)}")
+    if args.develop and not version:
+        print(f"--develop needs the version in the file name: requirements-<version>.txt, not {args.requirements.name}")
+        return 1
 
     feature = {}
     if args.map:
@@ -229,17 +255,23 @@ def main() -> int:
     done = 1
     with cf.ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = [pool.submit(classify, r, dest, extra, args.timeout) for r in reqs[1:]]
+        if args.develop:
+            futures.append(pool.submit(classify_source, f"horo-next-webui=={version.group(1)}",
+                                       dest, extra, args.timeout))
+            futures.append(pool.submit(classify, "setuptools>=80", dest, extra, args.timeout))
+        total = len(reqs) + 2 * args.develop
         for fut in cf.as_completed(futures):
             results.append(fut.result())
             done += 1
-            if done % 20 == 0 or done == len(reqs):
-                print(f"  {done}/{len(reqs)}")
+            if done % 20 == 0 or done == total:
+                print(f"  {done}/{total}")
 
     if not args.dest:
         shutil.rmtree(dest, ignore_errors=True)
 
+    develop_only = {f"horo-next-webui=={version.group(1)} (source)", "setuptools>=80"} if args.develop else set()
     for r in results:
-        r["needed_by"] = feature.get(r["package"], [])
+        r["needed_by"] = ["development"] if r["requirement"] in develop_only else feature.get(r["package"], [])
 
     problems = [r for r in results if r["status"] not in ("ok", "skipped")]
     by_status: dict[str, int] = {}
@@ -252,7 +284,7 @@ def main() -> int:
             print(f"  {status:10} {by_status[status]}")
 
     if problems:
-        print("\n=== Not available as a wheel ===")
+        print("\n=== Not available " + ("" if args.develop else "as a wheel ") + "===")
         for r in sorted(problems, key=lambda x: ("core" not in x["needed_by"], x["package"])):
             need = ", ".join(r["needed_by"]) if r["needed_by"] else "?"
             line = f"  {r['requirement']:40} {r['status']:10} needed by: {need}"

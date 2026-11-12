@@ -371,15 +371,15 @@ edit("api/routes.py",
 # A map action on another profile's session is scoped to that one request.
 edit("api/routes.py", '    """Handle all GET routes. Returns True if handled, False for 404."""\n',
      '    """Handle all GET routes. Returns True if handled, False for 404."""\n'
-     '    if handler.headers.get("X-Horo-Profile"):\n'
-     '        from api.horo_overview import profile_override\n'
+     '    from api.horo_overview import profile_override, requested_profile\n'
+     '    if requested_profile(handler):\n'
      '        refused = profile_override(handler)\n'
      '        if refused:\n'
      '            return bad(handler, refused, 403)\n')
 edit("api/routes.py", '    """Handle all POST routes. Returns True if handled, False for 404."""\n',
      '    """Handle all POST routes. Returns True if handled, False for 404."""\n'
-     '    if handler.headers.get("X-Horo-Profile"):\n'
-     '        from api.horo_overview import profile_override\n'
+     '    from api.horo_overview import profile_override, requested_profile\n'
+     '    if requested_profile(handler):\n'
      '        refused = profile_override(handler)\n'
      '        if refused:\n'
      '            arm_connection_close_if_body_pending(handler)\n'

@@ -42,6 +42,14 @@ Then on the offline machine:
 pip install --no-index --find-links wheelhouse horo-next-webui
 ```
 
+## Developing offline
+
+Each release also ships a source distribution: the tree the wheel was built from, upstream's tests, where it came from (`horo/SOURCE.json`: upstream tag and commit, overlay commit) and the patch against upstream. It builds without network access, into a wheel that installs the same files as the one here (each release checks this), so changes made on an air-gapped machine can be carried from one release to the next. `horo/DEVELOPING.md` inside it describes how.
+
+```bash
+pip download --no-deps --no-binary horo-next-webui horo-next-webui==X.Y.Z
+```
+
 ## Security review
 
 Each [GitHub release](https://github.com/iscodesnippet2/horo-next-webui/releases) attaches a CycloneDX SBOM, the vulnerability audit and the third-party notices. See the [security policy](https://github.com/iscodesnippet2/horo-next-webui/blob/horo/SECURITY.md) and the [reviewer's guide](https://github.com/iscodesnippet2/horo-next-webui/blob/horo/docs/security-review.md).

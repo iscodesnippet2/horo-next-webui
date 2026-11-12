@@ -294,8 +294,21 @@ class CliRow(unittest.TestCase):
             self.assertEqual(overview.cli_row(self.fetch, "a", False)["session_id"], "a")
         self.assertEqual(self.calls, 1)
 
-    def test_a_miss_is_left_to_the_direct_lookup(self):
+    def test_a_miss_on_a_fresh_index_is_left_to_the_direct_lookup(self):
         self.assertIsNone(overview.cli_row(self.fetch, "new", False))
+        self.assertEqual(self.calls, 1)
+
+    def test_a_session_newer_than_the_index_is_found(self):
+        rows = [{"session_id": "a"}]
+
+        def fetch(all_profiles):
+            self.calls += 1
+            return list(rows)
+        overview.cli_row(fetch, "a", False)
+        rows.append({"session_id": "new"})
+        self.assertEqual(overview.cli_row(fetch, "new", False)["session_id"], "new")
+        self.assertEqual(overview.cli_row(fetch, "new", False)["session_id"], "new")
+        self.assertEqual(self.calls, 2)
 
     def test_callers_cannot_change_the_index(self):
         overview.cli_row(self.fetch, "a", False)["n"] = 99
