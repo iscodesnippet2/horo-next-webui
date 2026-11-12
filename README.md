@@ -53,7 +53,9 @@ Security policy: [SECURITY.md](SECURITY.md). For a reviewer: [docs/security-revi
 with one exception: the agent mind map, new files under `overlay/mindmap/` hung
 on a handful of exact anchors. The launcher
 is changed because, installed from a wheel, upstream's would pipe a GitHub
-installer into bash or create a virtualenv inside site-packages. The one
+installer into bash or create a virtualenv inside site-packages; it also takes
+`--host` and `--port`, and refuses a port another service holds, naming a free
+one (on macOS a wildcard bind would otherwise start beside it). The one
 runtime default changed is the automatic GitHub update check, now off; the CSP
 no longer names CDN, analytics or font hosts.
 

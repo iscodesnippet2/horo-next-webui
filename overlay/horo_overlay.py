@@ -160,6 +160,160 @@ edit("bootstrap.py",
      'server_cwd = os.environ.get("HERMES_WEBUI_SERVER_CWD", "").strip() or str(agent_dir or REPO_ROOT)',
      'server_cwd = os.environ.get("HERMES_WEBUI_SERVER_CWD", "").strip() or str(state_dir)')
 
+# Host and port on the command line. Upstream takes the port only as a bare
+# positional; `--port` is what an operator types first, and argparse rejects it.
+# Both spellings are kept, checked for range, and refused when they disagree.
+edit("bootstrap.py",
+     'def parse_args() -> argparse.Namespace:\n',
+     '''def _port_arg(value: str) -> int:
+    # horo-next-webui: a port is 1-65535; anything else is refused before any bind.
+    try:
+        port = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a port number: {value!r}") from None
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError(f"port must be 1-65535, got {port}")
+    return port
+
+
+def parse_args() -> argparse.Namespace:
+''')
+edit("bootstrap.py",
+     '''    parser.add_argument("port", nargs="?", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--host", default=DEFAULT_HOST)
+''',
+     '''    parser.add_argument(
+        "port", nargs="?", type=_port_arg,
+        help=f"Port to listen on (default {DEFAULT_PORT}, or HERMES_WEBUI_PORT).",
+    )
+    parser.add_argument(
+        "--port", dest="port_option", type=_port_arg, metavar="PORT",
+        help="Same as the positional port.",
+    )
+    parser.add_argument(
+        "--host", default=DEFAULT_HOST,
+        help=f"Address to listen on (default {DEFAULT_HOST}, or HERMES_WEBUI_HOST); "
+        "0.0.0.0 listens on every interface.",
+    )
+''')
+edit("bootstrap.py",
+     '    return parser.parse_args()\n',
+     '''    args = parser.parse_args()
+    if args.port is not None and args.port_option is not None and args.port != args.port_option:
+        parser.error(f"two ports given: {args.port} and --port {args.port_option}")
+    args.port = next((p for p in (args.port_option, args.port) if p is not None), DEFAULT_PORT)
+    return args
+''')
+
+# A busy port: upstream's advice names ./start.sh and a .env inside
+# site-packages, neither of which a wheel install has.
+edit("bootstrap.py",
+     '''                lines.append(
+                    f"Try an available port instead: ./start.sh {alternative}"
+                )
+                lines.append(
+                    f"Or set HERMES_WEBUI_PORT={alternative} in {REPO_ROOT / '.env'}."
+                )''',
+     '''                # horo-next-webui: advice for the installed command.
+                host_arg = "" if host == DEFAULT_HOST else f" --host {host}"
+                lines.append(
+                    f"Choose another port, e.g. the free one: hermes-webui --port {alternative}{host_arg}"
+                )
+                lines.append(f"(or set HERMES_WEBUI_PORT={alternative}).")''')
+
+# On macOS and the BSDs a wildcard bind (--host 0.0.0.0) succeeds beside a
+# listener on one address, so the bind check passes a busy port and the server
+# starts underneath the other service. After the bind check, a listener that
+# accepts a connection where the server would answer counts as in use too, and
+# takes the same path: our own WebUI is reported running, anything else refused.
+edit("bootstrap.py",
+     'def _url_host(host: str) -> str:\n',
+     '''def _own_addresses(family: int) -> set:
+    # horo-next-webui: this machine's addresses, from the standard library only:
+    # the hostname's, and the source address of the default route (a UDP
+    # connect sends nothing). A machine with neither gives loopback alone.
+    found = set()
+    try:
+        found |= {info[4][0] for info in socket.getaddrinfo(socket.gethostname(), None, family)}
+    except OSError:
+        pass
+    route_sock = socket.socket(family, socket.SOCK_DGRAM)
+    try:
+        route_sock.connect(("192.0.2.1" if family == socket.AF_INET else "2001:db8::1", 9))
+        found.add(route_sock.getsockname()[0])
+    except OSError:
+        pass
+    finally:
+        route_sock.close()
+    return found
+
+
+def _answers(host: str, port: int) -> bool:
+    # horo-next-webui: True when something accepts a TCP connection where the
+    # server would answer: the address itself, or for a wildcard bind loopback
+    # and this machine's own addresses.
+    if host in ("", "0.0.0.0"):
+        probes = {"127.0.0.1"} | _own_addresses(socket.AF_INET)
+    elif host in ("::", "[::]"):
+        probes = {"::1"} | _own_addresses(socket.AF_INET6)
+    else:
+        probes = {host.strip("[]")}
+    for probe in sorted(probes):
+        family = socket.AF_INET6 if ":" in probe else socket.AF_INET
+        probe_sock = socket.socket(family, socket.SOCK_STREAM)
+        try:
+            probe_sock.settimeout(0.5)
+            if probe_sock.connect_ex((probe, port)) == 0:
+                return True
+        except OSError:
+            pass
+        finally:
+            probe_sock.close()
+    return False
+
+
+def _check_nothing_answers(host: str, port: int) -> None:
+    # horo-next-webui: a listener the bind check could not see.
+    if not _answers(host, port):
+        return
+    check_host = _bind_host_for_check(host)
+    alternative = next((p for p in range(port + 1, min(port + 21, 65536))
+                        if _port_is_available(check_host, p) and not _answers(host, p)), None)
+    host_arg = "" if host == DEFAULT_HOST else f" --host {host}"
+    advice = (f"Choose another port, e.g. the free one: hermes-webui --port {alternative}{host_arg} "
+              f"(or set HERMES_WEBUI_PORT={alternative}).") if alternative else \
+        "No free alternative port was found nearby; choose one manually."
+    raise PortInUseError(
+        f"Port {port} on {host} is already in use by another service. {advice} "
+        "The existing service was left untouched; no configuration was changed."
+    )
+
+
+def _url_host(host: str) -> str:
+''')
+edit("bootstrap.py",
+     "        _check_port_available(args.host, args.port)\n",
+     "        _check_port_available(args.host, args.port)\n        _check_nothing_answers(args.host, args.port)\n")
+
+# The console script called main() directly, so upstream's `__main__` wrapper
+# never ran and every refusal (a busy port among them) printed a traceback. It
+# calls cli() now; main() keeps raising, as upstream's callers expect.
+edit("bootstrap.py",
+     'if __name__ == "__main__":\n',
+     '''def cli() -> int:
+    # horo-next-webui: the console script reports a refusal as one message, as
+    # `python bootstrap.py` does, not as a traceback.
+    try:
+        return main()
+    except Exception as exc:
+        print(f"[bootstrap] ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+''')
+edit("pyproject.toml", 'hermes-webui = "bootstrap:main"', 'hermes-webui = "bootstrap:cli"')
+
 # ── 4. Every root module ships ───────────────────────────────────────────
 # Upstream lists root modules by hand, and the list drifted: server.py imports
 # managed_agent_startup, which is not in it, so a wheel built from upstream's
@@ -328,7 +482,7 @@ if project.get("version") != EXPECTED_VERSION:
     fail(f"version {project.get('version')!r} != expected {EXPECTED_VERSION!r}")
 if "tool" in meta and "setuptools_scm" in meta["tool"]:
     fail("[tool.setuptools_scm] still present")
-if project.get("scripts", {}).get("hermes-webui") != "bootstrap:main":
+if project.get("scripts", {}).get("hermes-webui") != "bootstrap:cli":
     fail(f"console script changed upstream: {project.get('scripts')}")
 
 reqs = [ln.strip() for ln in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()

@@ -111,6 +111,21 @@ print("JSON" + json.dumps(out))
     check("curl" not in out and "install.sh" not in out, "launcher does not run a network installer")
     check(not (site / ".venv").exists(), "launcher creates no venv inside site-packages")
 
+    # ── Launcher: --host/--port, and a busy port refused with advice ─────
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", 0)); busy.listen()
+        taken = busy.getsockname()[1]
+        for host in ("127.0.0.1", "0.0.0.0"):
+            r = run(str(bindir / "hermes-webui"), "--host", host, "--port", str(taken), "--no-browser")
+            out = r.stdout + r.stderr
+            check(r.returncode != 0 and f"Port {taken} on {host} is already in use" in out
+                  and "hermes-webui --port " in out and "Traceback" not in out,
+                  f"a busy port on --host {host} is refused with a port to use instead",
+                  out.strip().splitlines()[-1] if out.strip() else "")
+    r = run(str(bindir / "hermes-webui"), "--port", "70000")
+    check(r.returncode != 0 and "port must be 1-65535" in r.stderr, "an out-of-range --port is refused",
+          r.stderr.strip().splitlines()[-1] if r.stderr.strip() else "")
+
     # ── Server: serves the UI and every front-end library from the wheel ─
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]
