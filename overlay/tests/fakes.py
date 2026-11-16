@@ -21,6 +21,7 @@ class State:
     def __init__(self) -> None:
         self.sonatype: dict[str, list[dict]] = {}   # purl (as asked) → vulnerabilities
         self.sonatype_status = 200
+        self.sonatype_calls = 0                     # requests Sonatype received
         self.sonatype_drop: set[str] = set()        # purls left unanswered
         self.sonatype_no_field: set[str] = set()    # answered without `vulnerabilities`
         self.osv: dict[tuple[str, str], list[str]] = {}
@@ -58,6 +59,7 @@ def serve(state: State, flag=None):
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             if self.path == "/api/v3/component-report":
+                state.sonatype_calls += 1
                 if state.sonatype_status != 200:
                     return self.reply({"message": "error"}, state.sonatype_status)
                 out = []

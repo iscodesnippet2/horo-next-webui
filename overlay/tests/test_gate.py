@@ -126,6 +126,33 @@ class Audit(Base):
         env = {**self.env, "SONATYPE_GUIDE_URL": "http://127.0.0.1:9/x"}
         self.assertHeld(self.audit(env)[0])
 
+    def osv_only(self, *extra):
+        bom = self.tmp / "b.cdx.json"
+        bom.write_text(json.dumps({"components": [{"purl": p} for p in PURLS]}))
+        return self.run_py("audit_shipped.py", bom, "--osv-only", *extra)
+
+    def test_osv_only_never_asks_sonatype(self):
+        """A run that does not publish spends no Sonatype credit, with the token set."""
+        self.state.sonatype["pkg:pypi/pyyaml@6.0.3"] = [VULN]
+        r = self.osv_only()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.state.sonatype_calls, 0)
+        self.assertIn("Sonatype is checked before publishing", r.stdout)
+
+    def test_osv_only_holds_an_osv_finding(self):
+        self.state.osv[("pyyaml", "6.0.3")] = ["GHSA-x"]
+        self.assertHeld(self.osv_only())
+
+    def test_osv_only_writes_no_audit_file(self):
+        """Its result must never pass for the release's audit."""
+        out = self.tmp / "audit.json"
+        self.assertNotEqual(self.osv_only("--json", out).returncode, 0)
+        self.assertFalse(out.exists())
+
+    def test_full_audit_asks_sonatype(self):
+        self.audit()
+        self.assertGreater(self.state.sonatype_calls, 0)
+
     def test_empty_sbom(self):
         bom = self.tmp / "e.json"
         bom.write_text('{"components": []}')

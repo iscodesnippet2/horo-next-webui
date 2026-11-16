@@ -90,6 +90,10 @@ on each supported Python and its server is started and fetched.
 **Zero known advisories, in OSV and Sonatype.** The enterprise mirror is
 guarded by Sonatype, so every shipped component is checked against both, and
 any finding — or a Sonatype check that could not run — holds the release.
+Sonatype Guide credits are limited, so only a run that publishes consults
+Sonatype: to choose versions, and once more for every shipped component after
+the wheel has passed everything else, just before TestPyPI. A run without
+`publish` chooses and audits by OSV alone.
 Sonatype's public API (Sonatype Guide) serves a subset of its commercial data;
 a clean result narrows the gap with the mirror, it cannot close it.
 

@@ -9,6 +9,10 @@ static/vendor and in the Mermaid bundle, the notices cover it, the SBOM is valid
 CycloneDX, it matches the wheel byte for byte, every dependency is hashed, and
 the audit covered every component in both databases.
 
+Before the audit has run (a release run that will not publish, see
+release.yml), pass `unaudited` for <audit.json>: every other check runs. The
+run that publishes always passes the audit file.
+
 Needs cyclonedx-python-lib[json-validation]. tests/mutate_release.py corrupts
 real release files one at a time and asserts this catches each.
 """
@@ -26,6 +30,7 @@ from cyclonedx.schema import SchemaVersion
 from cyclonedx.validation.json import JsonStrictValidator
 
 WHEEL, BOM, NOTICES, REQS, HASHES, AUDIT = map(Path, sys.argv[1:7])
+UNAUDITED = sys.argv[6] == "unaudited"
 VERSION = sys.argv[7]
 DIST = "horo-next-webui"
 REPO = "https://github.com/iscodesnippet2/horo-next-webui"
@@ -129,9 +134,13 @@ check(set(hashed) == set(pins) and all("--hash=sha256:" in b and f"=={pins[n]}" 
       "every dependency is pinned with hashes", sorted(set(hashed) ^ set(pins)))
 
 # ── Audit ────────────────────────────────────────────────────────────────
-audit = json.loads(AUDIT.read_text(encoding="utf-8")).get("audits", [])
-dbs = {a.get("database", "").split()[0]: a for a in audit}
-check(set(dbs) == {"OSV", "Sonatype"}, "audit ran both databases", sorted(dbs))
+dbs = {}
+if UNAUDITED:
+    print("  skip audit: not run yet; the publishing run checks it")
+else:
+    audit = json.loads(AUDIT.read_text(encoding="utf-8")).get("audits", [])
+    dbs = {a.get("database", "").split()[0]: a for a in audit}
+    check(set(dbs) == {"OSV", "Sonatype"}, "audit ran both databases", sorted(dbs))
 for name, a in dbs.items():
     check(a.get("result") == "pass" and not a.get("advisories") and not a.get("error"), f"{name}: no finding", a.get("error"))
     check(set(a.get("packages", [])) >= set(purls), f"{name}: covered every component",

@@ -30,9 +30,12 @@ these fails:
   and every package esbuild put in the Mermaid bundle — is checked against
   [OSV](https://osv.dev) and against Sonatype's data (the Sonatype Guide /
   OSS Index API). A missing or rejected token, an HTTP error, or a component
-  either database did not answer for holds the release.
+  either database did not answer for holds the release. Sonatype is checked
+  last, just before TestPyPI, and only on a run that publishes: its credits are
+  limited, so a build-only run audits against OSV alone.
 - **Versions are raised to clean ones.** Front-end libraries and Python floors
-  move to the lowest release clean in both databases. Mermaid is built from a
+  move to the lowest release clean in both databases (OSV alone on a
+  build-only run). Mermaid is built from a
   committed lockfile with `npm ci --ignore-scripts`; a vulnerable package in it
   is raised with `npm update`, and the fix must appear in the lock.
 - **14-day cooldown, no exceptions.** A just-published release is where a

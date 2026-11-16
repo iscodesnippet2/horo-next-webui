@@ -21,7 +21,8 @@ import zipfile
 from pathlib import Path
 
 VERIFY = Path(__file__).resolve().parent.parent / "verify_release.py"
-FILES = [Path(p).resolve() for p in sys.argv[1:7]]
+UNAUDITED = sys.argv[6] == "unaudited"
+FILES = [Path(p).resolve() for p in sys.argv[1:6 if UNAUDITED else 7]]
 VERSION = sys.argv[7]
 WHEEL, BOM, NOTICES, REQS, HASHES, AUDIT = range(6)
 
@@ -141,8 +142,15 @@ MUTATIONS = {
 }
 
 
+# Without an audit file, its mutations have nothing to corrupt.
+if UNAUDITED:
+    MUTATIONS = {k: v for k, v in MUTATIONS.items() if not k.startswith("audit ")}
+
+
 def run(files) -> subprocess.CompletedProcess:
-    return subprocess.run([sys.executable, str(VERIFY), *map(str, files), VERSION], capture_output=True, text=True)
+    audit = ["unaudited"] if UNAUDITED else []
+    return subprocess.run([sys.executable, str(VERIFY), *map(str, files), *audit, VERSION],
+                          capture_output=True, text=True)
 
 
 with tempfile.TemporaryDirectory() as tmp:

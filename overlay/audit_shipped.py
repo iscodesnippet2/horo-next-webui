@@ -17,6 +17,10 @@ release is not a clean one. The public API serves a subset of what Sonatype's
 commercial products know, so a clean result narrows the gap with the mirror; it
 cannot close it.
 
+--osv-only checks OSV alone, for a release run that will not publish: Sonatype
+Guide credits are limited, so Sonatype is consulted only on the way to PyPI.
+It writes no audit file, so its result can never stand in for the full audit.
+
 Run against the latest release, on demand, by .github/workflows/rescan.yml.
 """
 from __future__ import annotations
@@ -87,7 +91,10 @@ def main() -> int:
     ap.add_argument("--notes", type=Path)
     ap.add_argument("--report", type=Path)
     ap.add_argument("--json", type=Path)
+    ap.add_argument("--osv-only", action="store_true")
     a = ap.parse_args()
+    if a.osv_only and (a.json or a.notes or a.report):
+        ap.error("--osv-only writes nothing: its result is not the release's audit")
 
     bom = json.loads(a.sbom.read_text(encoding="utf-8"))
     purls = sorted({c["purl"] for c in bom.get("components", [])})
@@ -96,7 +103,8 @@ def main() -> int:
 
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     audits, problems = [], []
-    for label, check in (("OSV", check_osv), ("Sonatype (Sonatype Guide, OSS Index-compatible API)", check_sonatype)):
+    checks = [("OSV", check_osv), ("Sonatype (Sonatype Guide, OSS Index-compatible API)", check_sonatype)]
+    for label, check in checks[:1] if a.osv_only else checks:
         error, findings = check(purls)
         audits.append({"database": label, "checked_at": now, "target": TARGET, "packages": purls,
                        "advisories": findings, "error": error,
@@ -107,7 +115,7 @@ def main() -> int:
     flagged = {f["purl"] for x in audits for f in x["advisories"]}
     py = sum(p.startswith("pkg:pypi/") for p in purls)
     lines = [f"Shipped components: {py} Python (Linux / 3.12), {len(purls) - py} npm — "
-             f"OSV and Sonatype: {len(flagged)} with findings"]
+             f"{'OSV' if a.osv_only else 'OSV and Sonatype'}: {len(flagged)} with findings"]
     for x in audits:
         for f in sorted(x["advisories"], key=lambda f: (f["purl"], f["id"])):
             lines.append(f"  - {f['purl']}: {x['database'].split()[0]} {f['id']}"
@@ -123,7 +131,7 @@ def main() -> int:
 
     if flagged or problems:
         sys.exit("[audit] release held: findings, or a database not checked")
-    print("[audit] clean")
+    print("[audit] clean in OSV; Sonatype is checked before publishing" if a.osv_only else "[audit] clean")
     return 0
 
 
