@@ -7,7 +7,8 @@ front end for Hermes Agent (packaged as horo-next). Upstream ships packaging
 metadata but publishes no maintained wheel, and its launcher assumes a source
 checkout: from site-packages it would pipe a GitHub installer into bash and
 create a virtualenv inside site-packages. This overlay changes packaging and
-launch only, with one deliberate exception: the agent mind map (section 7).
+launch only, with two deliberate exceptions: the agent mind map (section 7)
+and the admin policy (section 8).
 
 Two kinds of step, deliberately treated differently (as in horo-next):
 
@@ -459,6 +460,107 @@ edit("static/index.html", '<script src="static/panels.js?v=__WEBUI_VERSION__" de
      '<script src="static/mindmap.js?v=__WEBUI_VERSION__" defer></script>\n'
      '<script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>\n')
 
+# ── 8. Admin policy ──────────────────────────────────────────────────────
+# A file the user cannot write ($HORO_WEBUI_POLICY, else /etc/horo/webui-policy.json)
+# locks settings and tabs, and blocks feature APIs (docs/admin-policy-design.md).
+# A policy is mandatory: without a usable one every API but login and /health
+# answers 503. Interface governance, not a security boundary. Its code is new
+# files; upstream's are touched only where settings are read and written, where
+# requests are dispatched, and where the tab and composer chips decide.
+POLICY = HERE / "policy"
+shutil.copy(POLICY / "horo_policy.py", ROOT / "api" / "horo_policy.py")
+shutil.copy(POLICY / "horo_policy.js", ROOT / "static" / "horo_policy.js")
+shutil.copy(POLICY / "horo_policy.css", ROOT / "static" / "horo_policy.css")
+ok("admin policy files")
+# C1–C5: every reader of load_settings sees the policy; nothing upstream writes
+# to settings.json ever does. save_settings and the startup rewrite read the
+# user's own values, or the policy's would be persisted.
+edit("api/config.py", "def load_settings() -> dict:\n", "def _horo_upstream_load_settings() -> dict:\n")
+edit("api/config.py", "def save_settings(settings: dict) -> dict:\n",
+     "def _horo_upstream_save_settings(settings: dict) -> dict:\n")
+edit("api/config.py",
+     "    persisted_speech_keys = _extract_persisted_speech_keys(raw_settings)\n    current = load_settings()\n",
+     "    persisted_speech_keys = _extract_persisted_speech_keys(raw_settings)\n"
+     "    current = _horo_upstream_load_settings()  # horo-next-webui: never persist policy values\n")
+edit("api/config.py", "_startup_settings = load_settings()\n",
+     "_startup_settings = _horo_upstream_load_settings()  # horo-next-webui: rewritten to disk below\n")
+_config = ROOT / "api" / "config.py"
+_config.write_text(_config.read_text(encoding="utf-8") + """
+
+# horo-next-webui: the admin policy (api/horo_policy.py) over every reader and
+# writer of settings. Modules importing load_settings/save_settings from here
+# get these: every one imports after this module has finished executing.
+from api import horo_policy as _horo_policy  # noqa: E402
+
+_horo_policy.configure(allowed=_SETTINGS_ALLOWED_KEYS, defaults=_SETTINGS_DEFAULTS, bools=_SETTINGS_BOOL_KEYS,
+                       enums=_SETTINGS_ENUM_VALUES, ints=_SETTINGS_INT_RANGES, floats=_SETTINGS_FLOAT_RANGES)
+load_settings = _horo_policy.wrap_load(_horo_upstream_load_settings)
+save_settings = _horo_policy.wrap_save(_horo_upstream_save_settings, _horo_upstream_load_settings)
+""", encoding="utf-8")
+ok("api/config.py: policy wraps load_settings and save_settings")
+# R1: what is locked, for the page to show. Not from load_settings: save_settings
+# writes back every key it loaded.
+edit("api/routes.py",
+     '        settings = load_settings()\n        settings["persisted_speech_keys"] = persisted_speech_settings_keys()\n',
+     '        settings = load_settings()\n        settings["persisted_speech_keys"] = persisted_speech_settings_keys()\n'
+     '        from api.horo_policy import client_view as _horo_policy_view\n'
+     '        settings["horo_policy"] = _horo_policy_view()\n')
+# S1–S2: after authentication, before any handler, for every method: 503 without
+# a usable policy, 403 for a blocked feature. A refused write may leave its body
+# unread; the connection is closed so it cannot poison the next request.
+for _old in ("            if not check_auth_or_close(self, parsed): return\n            result = handle_get(self, parsed)\n",
+             "            if not _is_csp_report_post and not check_auth_or_close(self, parsed): return\n"
+             "            result = route_func(self, parsed)\n"):
+    _call = _old.splitlines(keepends=True)[-1]
+    edit("server.py", _old, _old.removesuffix(_call)
+         + "            from api.horo_policy import refusal as _horo_refusal\n"
+           "            _horo_refused = _horo_refusal(parsed.path)\n"
+           "            if _horo_refused:\n"
+           "                from api.helpers import arm_connection_close_if_body_pending\n"
+           "                arm_connection_close_if_body_pending(self)\n"
+           "                return j(self, _horo_refused[1], status=_horo_refused[0])\n"
+         + _call)
+# T1: chat and settings stay visible unless the policy hides settings. The
+# user's own hidden_tabs still cannot: upstream drops settings from it on save.
+edit("static/panels.js",
+     "    if(!panel||_ALWAYS_VISIBLE_TABS.has(panel)) return;\n    if(out.indexOf(panel)===-1) out.push(panel);\n",
+     "    if(!panel||_horoAlwaysVisible(panel)) return;\n    if(out.indexOf(panel)===-1) out.push(panel);\n")
+edit("static/panels.js", "    if(_ALWAYS_VISIBLE_TABS.has(panel)) shouldHide=false;\n",
+     "    if(_horoAlwaysVisible(panel)) shouldHide=false;\n")
+# A hidden panel has no other way in: the rail, the keyboard shortcut, ?panel=,
+# the quota chip and toggleSettings all go through switchPanel.
+edit("static/panels.js",
+     "async function switchPanel(name, opts = {}) {\n  const nextPanel = name || 'chat';\n",
+     "async function switchPanel(name, opts = {}) {\n"
+     "  if (_horoPolicyRefusesPanel(name || 'chat')) return false;  // horo-next-webui: admin policy\n"
+     "  const nextPanel = name || 'chat';\n")
+# T2: the first paint comes before /api/settings: the cached policy's tabs too.
+edit("static/index.html", "var p=h?clean(JSON.parse(h)):[];",
+     "var p=h?clean(JSON.parse(h)):[];try{var hp=JSON.parse(localStorage.getItem('horo-policy')||'null');"
+     "if(hp&&Array.isArray(hp.hide_tabs))hp.hide_tabs.forEach(function(id){if(id!=='chat'&&p.indexOf(id)===-1)p.push(id);});}catch(e){}")
+# P1–P4: a locked chip does nothing, and says why.
+edit("static/panels.js", "function _toggleTabVisibilityChip(panel){\n",
+     "function _toggleTabVisibilityChip(panel){\n  if(_horoPolicyLocked('tab',panel))return;\n")
+edit("static/panels.js", "function _toggleComposerControlChip(key){\n",
+     "function _toggleComposerControlChip(key){\n  if(_horoPolicyLocked('setting',key))return;\n")
+_LOCK = "{chip.classList.add('chip-locked');chip.setAttribute('aria-disabled','true');chip.title='由管理員設定';}"
+edit("static/panels.js",
+     "    chip.onclick=function(){\n      if(Date.now()<_tabVisibilityDragSuppressUntil)return;\n"
+     "      _toggleTabVisibilityChip(panel);\n",
+     f"    if(_horoPolicyLocked('tab',panel)){_LOCK}\n"
+     "    chip.onclick=function(){\n      if(Date.now()<_tabVisibilityDragSuppressUntil)return;\n"
+     "      _toggleTabVisibilityChip(panel);\n")
+edit("static/panels.js",
+     "    chip.onclick=function(){if(Date.now()<_composerControlDragSuppressUntil)return;_toggleComposerControlChip(def.key);};\n",
+     f"    if(_horoPolicyLocked('setting',def.key)){_LOCK}\n"
+     "    chip.onclick=function(){if(Date.now()<_composerControlDragSuppressUntil)return;_toggleComposerControlChip(def.key);};\n",
+     count=2)
+# P5: not deferred, so its fetch hook is in place before any deferred script asks.
+edit("static/index.html", '<link rel="stylesheet" href="static/mindmap.css?v=__WEBUI_VERSION__">\n',
+     '<link rel="stylesheet" href="static/mindmap.css?v=__WEBUI_VERSION__">\n'
+     '<link rel="stylesheet" href="static/horo_policy.css?v=__WEBUI_VERSION__">\n'
+     '<script src="static/horo_policy.js?v=__WEBUI_VERSION__"></script>\n')
+
 # ── Postconditions ───────────────────────────────────────────────────────
 try:
     from packaging.requirements import Requirement
@@ -503,6 +605,17 @@ for f in ROOT.glob("*.py"):
     for mod in re.findall(r"^\s*(?:from|import) (\w+)", f.read_text(encoding="utf-8"), re.M):
         if (ROOT / f"{mod}.py").exists() and mod not in declared:
             fail(f"{f.name} imports root module {mod!r}, which the wheel would not ship")
+
+# The policy must see every settings read and stay out of every write. A new
+# call inside config.py runs on one side of the wrap or the other: decide which.
+config_code = "\n".join(ln.split("#", 1)[0] for ln in (ROOT / "api" / "config.py").read_text(encoding="utf-8").splitlines())
+for name in ("load_settings", "save_settings"):
+    calls = re.findall(rf"(?<![\w.`]){name}\(", config_code)
+    if calls:
+        fail(f"api/config.py calls {name}() itself ({len(calls)}x): decide which side of the policy it is on")
+for path, marker in (("server.py", "_horo_refusal(parsed.path)"), ("api/routes.py", 'settings["horo_policy"]')):
+    if marker not in (ROOT / path).read_text(encoding="utf-8"):
+        fail(f"{path}: admin policy hook missing")
 
 boot = (ROOT / "bootstrap.py").read_text(encoding="utf-8")
 if "curl -fsSL" in boot:

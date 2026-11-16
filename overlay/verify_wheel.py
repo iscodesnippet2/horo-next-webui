@@ -7,7 +7,9 @@ front-end libraries still fetched from a CDN (blank diagrams, no highlighting
 offline), a vendored path that 404s from the wheel, .mjs served with a type
 the browser refuses to import, the version badge reading "unknown", and the
 launcher piping a GitHub installer into bash or creating a venv inside
-site-packages when Hermes Agent is absent.
+site-packages when Hermes Agent is absent. And the admin policy: without a
+usable one every API answers 503, with one its values are forced and kept out
+of settings.json, and blocked features answer 403.
 
 Runs outside the source tree with a throwaway HERMES_HOME and a PATH without
 `hermes`, so nothing resolves to a checkout or touches a real ~/.hermes.
@@ -26,6 +28,8 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+from policy_fixture import isolated_env, launch_command, write_policy
 
 WHEEL, PYV, EXPECTED = Path(sys.argv[1]).resolve(), sys.argv[2], sys.argv[3]
 DIST = "horo-next-webui"
@@ -50,10 +54,8 @@ with tempfile.TemporaryDirectory() as tmp:
     home.mkdir(); cwd.mkdir()
     bindir = venv / "bin"
     # HOME too: upstream also looks for an agent checkout under ~/.hermes and ~/.
-    env = {**os.environ, "HOME": str(home), "HERMES_HOME": str(home / ".hermes"), "VIRTUAL_ENV": str(venv), "NO_COLOR": "1",
+    env = {**isolated_env(os.environ, home), "VIRTUAL_ENV": str(venv), "NO_COLOR": "1",
            "PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin"}
-    for k in ("PYTHONPATH", "HERMES_WEBUI_AGENT_DIR", "HERMES_WEBUI_PYTHON"):
-        env.pop(k, None)
 
     def run(*cmd, **kw):
         return subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=600, **kw)
@@ -129,21 +131,39 @@ print("JSON" + json.dumps(out))
     # ── Server: serves the UI and every front-end library from the wheel ─
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]
+    # The admin policy every check below runs under (policy_fixture.py).
+    policy_file = tmp / "admin" / "webui-policy.json"
+    policy_file.parent.mkdir()
+    POLICY = {"version": 1, "settings": {"hide_composer_yolo": True}, "hide_tabs": ["settings"],
+              "block_features": ["kanban", "logs"]}
+    write_policy(policy_file, POLICY)
     senv = {**env, "HERMES_WEBUI_HOST": "127.0.0.1", "HERMES_WEBUI_PORT": str(port),
-            "HERMES_WEBUI_STATE_DIR": str(home / "webui")}
+            "HORO_WEBUI_POLICY": str(policy_file)}
     log = tmp / "server.log"
-    proc = subprocess.Popen([str(py), str(site / "server.py")], cwd=cwd, env=senv,
+    proc = subprocess.Popen(launch_command(py, site, policy_file), cwd=cwd, env=senv,
                             stdout=log.open("w"), stderr=subprocess.STDOUT, start_new_session=True)
     base = f"http://127.0.0.1:{port}"
 
-    def get(path: str) -> tuple[int, str, bytes]:
+    def request(path: str, body=None, at: str = "") -> tuple[int, str, bytes]:
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request((at or base) + path, data=data,
+                                     headers={"Content-Type": "application/json"} if data else {})
         try:
-            with urllib.request.urlopen(base + path, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 return resp.status, resp.headers.get("Content-Type", ""), resp.read()
         except urllib.error.HTTPError as e:
-            return e.code, e.headers.get("Content-Type", ""), b""
+            return e.code, e.headers.get("Content-Type", ""), e.read()
         except OSError:
             return 0, "", b""
+
+    def get(path: str) -> tuple[int, str, bytes]:
+        return request(path)
+
+    def as_json(raw: bytes) -> dict:
+        try:
+            return json.loads(raw or b"{}")
+        except ValueError:
+            return {}
 
     try:
         for _ in range(120):
@@ -188,6 +208,48 @@ print("JSON" + json.dumps(out))
         body = get("/" + mermaid)[2] if mermaid else b""
         dp = re.search(rb"@license DOMPurify (\d+\.\d+\.\d+)", body)
         check(bool(dp), "Mermaid bundle embeds DOMPurify", dp[1].decode() if dp else "not found")
+
+        # ── Admin policy: forced, kept out of settings.json, blocking ────
+        view = settings.get("horo_policy", {})
+        check(settings.get("hide_composer_yolo") is True and {"settings", "kanban", "logs"} <= set(settings.get("hidden_tabs", [])),
+              "/api/settings returns the policy's values and tabs",
+              f"{settings.get('hide_composer_yolo')} {settings.get('hidden_tabs')}")
+        check(view == {"path": str(policy_file), "settings": ["hide_composer_yolo"],
+                       "hide_tabs": ["settings", "kanban", "logs"], "block_features": ["kanban", "logs"]},
+              "/api/settings lists what the policy locks", str(view))
+        status, _, raw = request("/api/settings", {"hide_composer_yolo": False, "hidden_tabs": ["kanban", "memory"],
+                                                   "send_key": "ctrl+enter"})
+        saved = as_json(raw)
+        on_disk = as_json((home / "webui" / "settings.json").read_bytes()) if (home / "webui" / "settings.json").exists() else {}
+        check(status == 200 and saved.get("hide_composer_yolo") is True and saved.get("send_key") == "ctrl+enter",
+              "a locked setting cannot be changed; others can", f"HTTP {status} {str(saved)[:160]}")
+        check(on_disk.get("send_key") == "ctrl+enter" and on_disk.get("hide_composer_yolo") is not True
+              and on_disk.get("hidden_tabs") == ["memory"] and "horo_policy" not in on_disk,
+              "no policy value is written to settings.json",
+              str({k: on_disk.get(k) for k in ("hide_composer_yolo", "hidden_tabs", "horo_policy")}))
+        blocked = {p: request(p)[0] for p in ("/api/kanban/board", "/api/logs", "/API/Logs")}
+        check(set(blocked.values()) == {403}, "a blocked feature's API answers 403", str(blocked))
+        status, _, raw = request("/api/session/new", {})
+        sid = (as_json(raw).get("session") or {}).get("session_id", "")
+        free = {"/api/sessions": request("/api/sessions")[0], "/api/session/new": status,
+                "/api/session": request(f"/api/session?session_id={sid}")[0],
+                "/api/memoryx": request("/api/memoryx")[0],
+                "/api/chat/start": request("/api/chat/start", {"session_id": sid, "message": "hi"})[0]}
+        check(free["/api/sessions"] == 200 and free["/api/session/new"] == 200 and free["/api/session"] == 200
+              and not {403, 503} & set(free.values()),
+              "sessions, chat and look-alike paths are not blocked", str(free))
+        write_policy(policy_file, "{ broken")
+        status, _, raw = request("/api/settings")
+        err = as_json(raw).get("horo_policy_error", {})
+        check(status == 503 and err.get("path") == str(policy_file) and "JSON" in err.get("reason", ""),
+              "a broken policy answers 503 with its path and reason", f"HTTP {status} {err}")
+        check(request("/api/sessions")[0] == 503 and request("/health")[0] == 200 and request("/")[0] == 200,
+              "without a usable policy: APIs 503, /health and the page still served")
+        write_policy(policy_file, POLICY)
+        check(request("/api/settings")[0] == 200, "a fixed policy applies without a restart")
+        policy_file.unlink()
+        check(request("/api/settings")[0] == 503, "a removed policy is not remembered: 503")
+        write_policy(policy_file, POLICY)
     finally:
         if proc.poll() is None:
             os.killpg(proc.pid, signal.SIGTERM)
@@ -197,6 +259,40 @@ print("JSON" + json.dumps(out))
                 os.killpg(proc.pid, signal.SIGKILL)
     if failures:
         print(log.read_text()[-1500:])
+
+    # ── Admin policy, no exception: as an installed server starts ────────
+    # The user's own file is refused; so is no file at all.
+    own = tmp / "own" / "webui-policy.json"
+    own.parent.mkdir()
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0)); port2 = s.getsockname()[1]
+    plain = subprocess.Popen([str(py), str(site / "server.py")], cwd=cwd,
+                             env={**senv, "HERMES_WEBUI_PORT": str(port2), "HORO_WEBUI_POLICY": str(own)},
+                             stdout=(tmp / "plain.log").open("w"), stderr=subprocess.STDOUT, start_new_session=True)
+    base2 = f"http://127.0.0.1:{port2}"
+    try:
+        for _ in range(120):
+            if plain.poll() is not None or request("/health", at=base2)[0] == 200:
+                break
+            time.sleep(0.5)
+        status, _, raw = request("/api/settings", at=base2)
+        reason = as_json(raw).get("horo_policy_error", {}).get("reason", "")
+        check(status == 503 and "no policy file" in reason and request("/health", at=base2)[0] == 200,
+              "no policy: 503 with the reason, /health still answers", f"HTTP {status} {reason}")
+        write_policy(own, {"version": 1})
+        status, _, raw = request("/api/settings", at=base2)
+        reason = as_json(raw).get("horo_policy_error", {}).get("reason", "")
+        check(status == 503 and "owned by the user running the WebUI" in reason,
+              "a policy the user owns is refused", f"HTTP {status} {reason}")
+        status, _, raw = request("/api/auth/status", at=base2)
+        check(status not in (0, 403, 503), "login stays reachable without a policy", f"HTTP {status}")
+    finally:
+        if plain.poll() is None:
+            os.killpg(plain.pid, signal.SIGTERM)
+            try:
+                plain.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(plain.pid, signal.SIGKILL)
 
 if failures:
     sys.exit(f"[verify] Python {PYV}: {len(failures)} check(s) failed")

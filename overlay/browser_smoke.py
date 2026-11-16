@@ -8,7 +8,10 @@ PDF.js imported by a relative path from a blob: module does not resolve, and a
 library moved to a new major can change behaviour. This runs upstream's own
 render paths — renderMermaidBlocks, renderKatexBlocks, loadPdfInline, Prism's
 autoloader, xterm — in a real browser, and fails on any request that leaves
-the machine.
+the machine. All of it under an admin policy that blocks every feature it may
+block: none of them may break the chat, sessions, workspaces or the mind map.
+Then the policy itself: a locked chip does not move, a settings panel the
+policy hides has no way in, and without a usable policy the page says why.
 
 Needs Playwright (`uv run --with playwright`) and its Chromium
 (`playwright install --with-deps chromium`).
@@ -29,7 +32,43 @@ from urllib.parse import urlsplit
 
 from playwright.sync_api import sync_playwright
 
+from policy_fixture import isolated_env, launch_command, write_policy
+
 WHEEL, PYV = Path(sys.argv[1]).resolve(), sys.argv[2]
+
+# The first batch of blockable features (docs/admin-policy-design.md, §5), all at once.
+POLICY = {"version": 1, "settings": {"hide_composer_yolo": True}, "hide_tabs": ["settings"],
+          "block_features": ["kanban", "tasks", "memory", "insights", "logs", "terminal", "mcp", "extensions"]}
+
+# Every way into the settings panel, with the policy hiding it.
+POLICY_PROBE = r"""async () => {
+  const settle = () => new Promise(r => setTimeout(r, 150));
+  const out = {view: (await api('/api/settings')).horo_policy};
+  _renderComposerSituationalControlChips();
+  const chip = [...document.querySelectorAll('#composerSituationalControlsChips .tab-visibility-chip')]
+    .find(c => c.classList.contains('chip-locked'));
+  const before = window._composerControlVisibility && window._composerControlVisibility.hide_composer_yolo;
+  out.chip = chip ? [chip.textContent, chip.getAttribute('aria-disabled'), chip.title] : null;
+  if (chip) chip.click();
+  out.toggled = before !== (window._composerControlVisibility && window._composerControlVisibility.hide_composer_yolo);
+  out.free = !![...document.querySelectorAll('#composerSituationalControlsChips .tab-visibility-chip')]
+    .find(c => !c.classList.contains('chip-locked'));
+  await switchPanel('chat'); await settle();
+  const tries = {};
+  await switchPanel('settings'); await settle(); tries.switchPanel = _currentPanel;
+  toggleSettings(); await settle(); tries.toggleSettings = _currentPanel;
+  document.dispatchEvent(new KeyboardEvent('keydown', {key: ',', ctrlKey: true, metaKey: true, bubbles: true}));
+  await settle(); tries.shortcut = _currentPanel;
+  document.querySelector('.rail [data-panel="settings"]').click(); await settle(); tries.rail = _currentPanel;
+  document.getElementById('providerQuotaChip').click(); await settle(); tries.quotaChip = _currentPanel;
+  out.tries = tries;
+  out.mainSettings = getComputedStyle(document.getElementById('mainSettings')).display;
+  out.railHidden = [...document.querySelectorAll('[data-panel="settings"]')].every(el => el.classList.contains('nav-tab-hidden'));
+  out.tabsHidden = ['kanban', 'tasks', 'memory', 'insights', 'logs']
+    .filter(p => [...document.querySelectorAll(`[data-panel="${p}"]`)].every(el => el.classList.contains('nav-tab-hidden')));
+  out.blocked = await fetch('api/kanban/board').then(r => r.status);
+  return out;
+}"""
 
 # A one-page PDF with a line of text. pdf.js recovers the xref table itself.
 PDF = b"""%PDF-1.4
@@ -122,11 +161,13 @@ with tempfile.TemporaryDirectory() as tmp:
                                         text=True).strip())
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]
-    env = {**os.environ, "HOME": str(home), "HERMES_HOME": str(home / ".hermes"),
-           "HERMES_WEBUI_HOST": "127.0.0.1", "HERMES_WEBUI_PORT": str(port),
-           "HERMES_WEBUI_STATE_DIR": str(home / "webui")}
+    policy_file = tmp / "admin" / "webui-policy.json"
+    policy_file.parent.mkdir()
+    write_policy(policy_file, POLICY)
+    env = {**isolated_env(os.environ, home), "HERMES_WEBUI_HOST": "127.0.0.1", "HERMES_WEBUI_PORT": str(port),
+           "HORO_WEBUI_POLICY": str(policy_file)}
     log = tmp / "server.log"
-    proc = subprocess.Popen([str(py), str(site / "server.py")], cwd=tmp, env=env,
+    proc = subprocess.Popen(launch_command(py, site, policy_file), cwd=tmp, env=env,
                             stdout=log.open("w"), stderr=subprocess.STDOUT, start_new_session=True)
     base = f"http://127.0.0.1:{port}"
     try:
@@ -324,6 +365,30 @@ with tempfile.TemporaryDirectory() as tmp:
               return {imported: s.imported, seen: seen.filter(x => !x.startsWith('other')),
                       stored: localStorage.getItem('horo-initial-messages')};
             }""")
+            policy = page.evaluate(POLICY_PROBE)
+            # The first paint, before /api/settings: from the cached policy.
+            early = browser.new_page()
+            early.route(lambda url: urlsplit(url).hostname not in ("127.0.0.1", "localhost"), lambda route: route.abort())
+            early.goto(base + "/?panel=settings", wait_until="domcontentloaded")
+            first_paint = early.evaluate("""() => [...document.querySelectorAll('[data-panel="settings"]')]
+              .every(el => el.classList.contains('nav-tab-hidden'))""")
+            early.wait_for_function("() => S._bootReady", timeout=30000)
+            url_panel = early.evaluate("_currentPanel")
+            early.close()
+            main_errors = list(errors)
+            # Without a usable policy: the page says why, and recovers once it is fixed.
+            write_policy(policy_file, "{ broken")
+            page.reload(wait_until="load")
+            page.wait_for_selector("#horoPolicyBlocked", timeout=30000)
+            blocked_page = page.evaluate("""() => ({
+              path: document.querySelector('#horoPolicyBlocked .horo-policy-path').textContent,
+              reason: document.querySelector('#horoPolicyBlocked .horo-policy-reason').textContent,
+              shown: document.getElementById('horoPolicyBlocked').getBoundingClientRect().width > 0,
+            })""")
+            write_policy(policy_file, POLICY)
+            page.reload(wait_until="load")
+            page.wait_for_function("() => S._bootReady", timeout=30000)
+            recovered = page.evaluate("!document.getElementById('horoPolicyBlocked')")
             browser.close()
         print(f"  libraries: mermaid {out['mermaidVersion'] or '?'}, pdf.js {out['pdfjsVersion'] or '?'}, "
               f"katex {out['katexVersion'] or '?'}")
@@ -359,8 +424,25 @@ with tempfile.TemporaryDirectory() as tmp:
         check(fresh is False, "a session the WebUI never opened is imported before it opens", str(fresh))
         check(later == {"imported": True, "seen": ["load+10", "import+shown"], "stored": "10"},
               "an imported session opens before its import, in the window set on the map", str(later))
+        check(policy["view"] == {"path": str(policy_file), "settings": ["hide_composer_yolo"],
+                                 "hide_tabs": ["settings", "kanban", "tasks", "memory", "insights", "logs"],
+                                 "block_features": POLICY["block_features"]},
+              "the page receives what the policy locks", str(policy["view"]))
+        check(bool(policy["chip"]) and "YOLO" in policy["chip"][0].upper() and policy["chip"][1:] == ["true", "由管理員設定"]
+              and not policy["toggled"] and policy["free"],
+              "a locked composer chip is marked and does not move; the others are not locked",
+              f"{policy['chip']} toggled={policy['toggled']} free={policy['free']}")
+        check(set(policy["tries"].values()) == {"chat"} and policy["mainSettings"] == "none" and policy["railHidden"],
+              "a settings panel the policy hides has no way in", f"{policy['tries']} {policy['mainSettings']}")
+        check(policy["tabsHidden"] == ["kanban", "tasks", "memory", "insights", "logs"] and policy["blocked"] == 403,
+              "blocked features' tabs are hidden and their API refused", f"{policy['tabsHidden']} {policy['blocked']}")
+        check(first_paint and url_panel != "settings", "settings stays hidden on the first paint and from ?panel=settings",
+              f"first paint {first_paint}, landed on {url_panel}")
+        check(blocked_page["shown"] and blocked_page["path"] == str(policy_file) and "JSON" in blocked_page["reason"],
+              "without a usable policy the page names the policy and the reason", str(blocked_page))
+        check(recovered, "a fixed policy recovers on reload, without restarting the server")
         check(not external, "no request leaves the machine", ", ".join(sorted(set(external))[:4]))
-        check(not errors, "no uncaught page errors", " | ".join(errors[:3]))
+        check(not main_errors, "no uncaught page errors", " | ".join(main_errors[:3]))
     finally:
         if proc.poll() is None:
             os.killpg(proc.pid, signal.SIGTERM)

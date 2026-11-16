@@ -1,0 +1,36 @@
+/* Admin policy (horo-next-webui): locked chips, and the page when no policy can be used. */
+.tab-visibility-chip.chip-locked {
+  cursor: not-allowed;
+  opacity: 0.55;
+  border-style: dashed;
+}
+.tab-visibility-chip.chip-locked::after {
+  content: " 🔒";
+  font-size: 0.85em;
+}
+
+#horoPolicyBlocked {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.55);
+}
+#horoPolicyBlocked .horo-policy-card {
+  max-width: 560px;
+  width: 100%;
+  padding: 24px;
+  border-radius: 12px;
+  background: var(--surface, #fff);
+  color: var(--text, #111);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+#horoPolicyBlocked h2 { margin: 0 0 12px; font-size: 1.2em; }
+#horoPolicyBlocked dl { margin: 12px 0; display: grid; grid-template-columns: max-content 1fr; gap: 6px 12px; }
+#horoPolicyBlocked dt { font-weight: 600; }
+#horoPolicyBlocked dd { margin: 0; font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+#horoPolicyBlocked .horo-policy-hint { opacity: 0.75; font-size: 0.9em; }
+#horoPolicyBlocked button { margin-top: 8px; padding: 6px 14px; cursor: pointer; }
