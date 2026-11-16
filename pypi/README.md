@@ -9,11 +9,13 @@ hermes-webui
 
 Install it into the same environment as [horo-next](https://pypi.org/project/horo-next/) (Hermes Agent). The command is `hermes-webui` and state lives in `~/.hermes/webui`, as upstream.
 
+**It needs an admin policy before it can be used** (see below): without one the page loads, but every API answers 503.
+
 It listens on `127.0.0.1:8787` unless told otherwise: `hermes-webui --host 0.0.0.0 --port 9000` (or `HERMES_WEBUI_HOST` / `HERMES_WEBUI_PORT`). If the port is taken it stops, names a free one to use instead, and leaves the other service alone.
 
 ## What differs from upstream
 
-Packaging and launch, plus one feature: an agent mind map across profiles. Everything else behaves as upstream.
+Packaging and launch, plus two features: an agent mind map across profiles, and an admin policy. Everything else behaves as upstream.
 
 - **Works offline.** Prism, xterm, Mermaid and PDF.js are served from the wheel instead of cdn.jsdelivr.net.
 - **No known advisories in shipped code at release time**, in OSV or Sonatype's public data. Every front-end library is moved to the lowest clean release, and Mermaid is rebuilt from a lockfile so the DOMPurify it embeds is a fixed release too. Python dependency floors that admit a vulnerable version are raised. Each release notes exactly what changed.
@@ -22,7 +24,38 @@ Packaging and launch, plus one feature: an agent mind map across profiles. Every
 - The server's working directory is the WebUI state directory, not site-packages.
 - **No automatic outbound traffic.** The GitHub update check is off by default, and the CSP names no CDN, analytics or font host.
 - **Agent mind map.** One panel shows the sessions a person is part of across every profile, from the last 7 days, and opens any of them as a full-screen workspace. It reads `state.db` read-only and calls no model.
+- **Admin policy, required.** A file the user cannot write locks settings and tabs and blocks feature APIs; without a usable one the WebUI refuses to serve.
 - Python 3.11–3.13.
+
+## Admin policy (required)
+
+After installing, put a policy where the WebUI looks for it, or it will not serve: every API except `/health`, `/login` and `/api/auth/*` answers 503 and the page names the file and the reason. Restricting nothing still takes a file:
+
+```bash
+sudo mkdir -p /etc/horo
+echo '{"version": 1}' | sudo tee /etc/horo/webui-policy.json
+```
+
+Or name a file elsewhere, such as one on a shared folder for every machine:
+
+```bash
+HORO_WEBUI_POLICY=/mnt/share/horo/webui-policy.json hermes-webui
+```
+
+The user running the WebUI must neither own that file nor be able to write it or its folder; root ownership is not required. A fuller policy:
+
+```json
+{
+  "version": 1,
+  "settings": {"hide_composer_yolo": true, "check_for_updates": false},
+  "hide_tabs": ["insights", "settings"],
+  "block_features": ["kanban", "terminal"]
+}
+```
+
+`settings` forces upstream's own settings, by name; `hide_tabs` hides tabs (never `chat` or `skills`; `settings` may be); `block_features` answers 403 for `kanban`, `tasks`, `memory`, `insights`, `logs`, `terminal`, `mcp` or `extensions` and hides the tab. Changes apply without a restart. A missing, unreadable, invalid or user-writable file is refused, never replaced by the last good one.
+
+It is interface governance, not a security boundary: the WebUI runs as the user, who could run another copy. Enforce what matters (tools, approvals, network) outside the WebUI. Details: [README](https://github.com/iscodesnippet2/horo-next-webui/blob/horo/README.md#admin-policy).
 
 ## Versions
 

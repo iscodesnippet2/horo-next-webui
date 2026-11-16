@@ -24,8 +24,9 @@ committed here**. The default branch, `horo`, holds only the tooling:
 
 | Path | What it does |
 |---|---|
-| `overlay/horo_overlay.py` | Packaging, metadata, launcher and outbound-traffic changes applied to an upstream checkout; hangs the mind map on upstream's panels |
+| `overlay/horo_overlay.py` | Packaging, metadata, launcher and outbound-traffic changes applied to an upstream checkout; hangs the mind map on upstream's panels and the admin policy on its settings and dispatch |
 | `overlay/mindmap/` | The agent mind map: `/api/horo/overview` read model, panel script and styles |
+| `overlay/policy/` | The admin policy: loading and enforcement (`horo_policy.py`), locked chips and the no-policy page |
 | `overlay/security_bump.py` | Raises Python dependency floors that admit a vulnerable version |
 | `overlay/vendor_assets.py` | Self-hosts every front-end library at its lowest advisory-free release; rebuilds Mermaid from a lockfile |
 | `overlay/mermaid/` | The Mermaid build: entry point, `package.json`, committed `package-lock.json` |
@@ -38,6 +39,7 @@ committed here**. The default branch, `horo`, holds only the tooling:
 | `overlay/verify_release.py` | Checks the wheel, SBOM, notices, hashes and audit against each other |
 | `overlay/verify_wheel.py` | Installs the wheel into a clean venv, starts the server, fetches every vendored asset |
 | `overlay/browser_smoke.py` | Runs upstream's Mermaid, KaTeX, PDF.js, Prism and xterm render paths in Chromium from the installed wheel, offline |
+| `overlay/policy_fixture.py` | Starts the installed server under a test policy for the two checks above |
 | `overlay/tests/` | Gate tests against fake services, and mutation tests on real release files |
 | `overlay/sonatype_lookup.py` | Lists Sonatype's findings for every version of a package (via the `sonatype-lookup` workflow), to pick a replacement |
 | `.github/workflows/rescan.yml` | Re-audits the latest release when run by hand; opens an issue on a new advisory |
@@ -51,9 +53,11 @@ Security policy: [SECURITY.md](SECURITY.md). For a reviewer: [docs/security-revi
 
 ## Principles
 
-**Packaging and launch, plus one feature.** Product behaviour is upstream's,
-with one exception: the agent mind map, new files under `overlay/mindmap/` hung
-on a handful of exact anchors. The launcher
+**Packaging and launch, plus two features.** Product behaviour is upstream's,
+with two exceptions: the agent mind map, new files under `overlay/mindmap/` hung
+on a handful of exact anchors, and the admin policy (`overlay/policy/`), which
+locks upstream's own settings and tabs and blocks feature APIs, and without
+which the WebUI refuses to serve. The launcher
 is changed because, installed from a wheel, upstream's would pipe a GitHub
 installer into bash or create a virtualenv inside site-packages; it also takes
 `--host` and `--port`, and refuses a port another service holds, naming a free
@@ -149,6 +153,53 @@ A card's goal is the session's title, which a person can edit; edits live in
 `horo_goals.json` in the WebUI state directory, so `state.db` stays read-only and
 read-only sessions work too. Progress is the last prompt with substance: messages
 Hermes stores as `user` and bare acknowledgements are skipped. No model is involved.
+
+## Admin policy
+
+**A policy is required.** Without a usable one, every API except `/health`,
+`/login` and `/api/auth/*` answers 503, and the page says which file and why.
+The WebUI still starts, and recovers by itself once the file is fixed: no restart.
+
+The WebUI reads `$HORO_WEBUI_POLICY`, or `/etc/horo/webui-policy.json` when that is
+not set. The variable may name a shared folder, so one file can serve every
+machine. An admin who wants to restrict nothing still installs `{"version": 1}`.
+
+```json
+{
+  "version": 1,
+  "settings": {"hide_composer_yolo": true, "hide_composer_toolsets": true, "check_for_updates": false},
+  "hide_tabs": ["insights", "settings"],
+  "block_features": ["kanban", "terminal"]
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `version` | Required; only `1` |
+| `settings` | Forced values for upstream's own settings (`hide_composer_*`, `check_for_updates`, …), by upstream's names and checked against upstream's types. Every reader of settings sees them, the server included; none is ever written to the user's `settings.json`, and the user cannot change them. Not `hidden_tabs`, `tab_order` or the password |
+| `hide_tabs` | Tabs hidden on top of the user's own choice: `mindmap` `memory` `tasks` `kanban` `workspaces` `profiles` `insights` `logs` `todos` `settings`. Never `chat` or `skills`. Only the policy can hide `settings`; a hidden panel has no other way in (shortcut, `?panel=`, buttons) |
+| `block_features` | APIs answering 403, and their tab hidden: `kanban` `tasks` `memory` `insights` `logs` `terminal` `mcp` `extensions` (the path prefixes are in `overlay/policy/horo_policy.py`). Only features the chat, sessions, workspaces and the mind map do not use; each is tested blocked, all at once, in the browser smoke test |
+
+The file is refused — and the WebUI with it — when it is missing, unreadable
+(a share that went away), not valid JSON, names an unknown key, setting, tab or
+feature, has a value of the wrong type, or **when the user running the WebUI owns
+it or can write it or its folder**. Root ownership is not required (a share may
+squash root). Nothing falls back to a policy read before. The file is re-read
+when it changes; ownership and write access are checked on every request.
+
+In the settings panel a locked chip is dashed, marked 🔒 and does nothing.
+Other locked settings (checkboxes) show no lock in v1: the server keeps its value,
+and the control springs back after saving.
+
+**Interface governance, not a security boundary.** The WebUI runs as the user,
+who controls its process, environment and packages, and can run another copy
+without this overlay. What must really be enforced — dangerous tools, YOLO
+approval, outbound traffic — belongs outside the WebUI: OS permissions, a
+sandbox, network rules, agent configuration the admin controls. Hiding a WebUI
+button leaves the `horo` / `hermes` CLI able to do the same. One policy applies
+to every WebUI that reads it; there is no per-user or per-group policy, and
+which settings a user may still change is not yet configurable beyond hiding the
+settings panel. The design and its decisions: [docs/admin-policy-design.md](docs/admin-policy-design.md).
 
 ## What it does not cover
 

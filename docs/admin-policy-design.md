@@ -1,6 +1,6 @@
 # Admin policy：設計草案
 
-狀態：草案，尚未實作。第 4～6 節的 anchor 已在上游 `master`（`60b38c46`）與 release tag `v0.52.544` 查證過；`horo_overlay.py` 實際套用的是 release tag，實作時要再對一次。
+狀態：已實作於 `horo_overlay.py` 第 8 節（預定 0.52.544.5）。第 4～6 節的 anchor 已對 release tag `v0.52.544` 與上游 `master`（`382da96`）套用查證；實作與草案的差異見第 11 節。
 
 ## 1. 要解決的問題
 
@@ -251,3 +251,24 @@ v1 的限制：`settings` 裡不是 chip 的鍵（例如 `check_for_updates` 的
 2. 是否需要 v2 的 per-group policy（例如依 OS group 套用不同的 policy）。
 3. agent 端（horo-next）是否要有對應機制，例如由 admin 統一管理的 toolsets 白名單。這不屬於 WebUI 的範圍，但真正的限制要靠它。
 4. 測試時如何滿足權限檢查（第 7 節）。
+
+## 11. 實作紀錄
+
+與草案的差異與補充，以程式為準：
+
+- **C5（新增）**：`config.py` 模組層級的 `_startup_settings = load_settings()` 在 C1 改名後會找不到名字，而且它會把結果寫回 `settings.json`。改成讀 `_horo_upstream_load_settings()`，policy 值不會在啟動時被寫入。overlay 的 postcondition 另外要求 `config.py` 內不能再有直接呼叫 `load_settings()` / `save_settings()` 的地方（註解除外），上游新增呼叫時 build 會失敗，逼人決定它在 policy 的哪一側。
+- **C4**：附加在檔尾，並呼叫 `horo_policy.configure(...)` 傳入上游的設定 schema（允許的鍵、預設值、bool／enum／int／float 範圍）。`settings` 的強制值依這份 schema 檢查型別；schema 沒設定時視為 policy 不合法（fail closed）。
+- **wrap_save**：只丟掉「policy 隱藏、且使用者自己原本沒隱藏」的分頁。使用者自己也隱藏的分頁仍保留在他的 `hidden_tabs`，policy 撤掉後維持他的選擇。
+- **policy 無法使用時**：`load_settings` 照常回傳使用者的值（`/login` 要讀密碼 hash），`save_settings` 除了 `_set_password` / `_clear_password`（policy 不能鎖的鍵，登入時升級舊 hash 會用到）以外一律丟 `PolicyUnavailable`。
+- **503 的範圍**：草案寫「所有 `/api/*`」。實作改成白名單：只放行頁面外殼與靜態檔（`/`、`/index.html`、`/sessions`、`/session/*`、`/static/*`、manifest、`sw.js`、favicon）、`/health`、`/login`、`/api/auth/*`。`/share/*`、`/plugins/*`、`/extensions/*` 等非 `/api` 的功能路徑也會 503。路徑同時以原樣（casefold）與正規化後比對，兩者都要在白名單內；封鎖則任一形式符合即擋。
+- **`extensions` 功能**另外涵蓋非 `/api` 的 `/extensions`、`/plugins`、`/dashboard-plugins`。
+- **T1**：四處引用中改了兩處（`_sanitizeTabPanelList`、`_applyTabVisibility`）；`_availableSidebarPanels` 不改（settings 不進可排序清單），`_toggleTabVisibilityChip` 由 P1 處理。
+- **T2**：anchor 改為 inline script 的 `var p=h?clean(JSON.parse(h)):[];`，後面加上 localStorage `horo-policy` 快取的 `hide_tabs`。`fixed` 集合不改，否則 tab 排序會把 settings 當成可移動的分頁。
+- **G1（新增）**：`switchPanel` 開頭，policy 隱藏的分頁一律拒絕。rail、Cmd/Ctrl+,、`toggleSettings`、quota chip、`?panel=settings` 都經過 `switchPanel`，browser smoke 逐一驗證。
+- **P5**：`horo_policy.js` 以非 defer 的 `<script>` 放在 `<head>`（`horo_policy.css` 旁），保證在任何 defer script 發出請求前就掛上 `fetch` 攔截。前端透過攔截 GET `/api/settings` 的回應取得 `horo_policy`（在呼叫端拿到回應前更新），任何帶 `horo_policy_error` 的 503 都會蓋上說明畫面。
+- **鎖住的 chip**：加 `chip-locked`、`aria-disabled="true"`、title「由管理員設定」，樣式為虛線框加 🔒。
+- **測試如何滿足權限檢查（第 10 節第 4 點）**：
+  - 單元測試（`overlay/tests/test_policy.py`）以 mock 決定 `os.geteuid` 與 `os.access` 對 policy 檔與資料夾的結果，其餘照真實系統；另有一個不 mock 的測試，確認自己寫的檔案被拒。
+  - `verify_wheel.py`、`browser_smoke.py` 透過 `overlay/policy_fixture.py` 的 launcher 啟動 server：權限檢查**只對 fixture 那一個路徑**放行，內容驗證、mtime 重讀與其他路徑都走真實邏輯。`verify_wheel.py` 另外用一般方式（無例外）啟動第二個 server，確認沒有 policy 時 503、使用者自己擁有的 policy 被拒。產品本身沒有任何略過權限檢查的開關。
+- **`block_features` 第一批**：八項（kanban、tasks、memory、insights、logs、terminal、mcp、extensions）全部保留。browser smoke 讓八項同時封鎖，聊天、session、workspace、mind map 的既有檢查全部通過，頁面也沒有未捕捉的錯誤，沒有需要拿掉的項目。
+- **第 6 節「上游套用流程大致不必修改」不成立**：上游 boot 時只從 localStorage 讀 `hidden_tabs`，只在切換 profile 或打開 settings 面板時才向伺服器校正；settings 被 policy 藏起來時就永遠不會校正。`horo_policy.js` 在攔截到 GET `/api/settings` 時，用伺服器回傳的 `hidden_tabs`（已含 policy 分頁）更新 mirror 並套用。

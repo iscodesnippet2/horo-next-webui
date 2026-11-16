@@ -9,8 +9,9 @@ is specific to one product.
 An unofficial PyPI repackaging of [Hermes WebUI](https://github.com/nesquena/hermes-webui)
 (MIT), the browser front end for Hermes Agent. Upstream's own wheel cannot start
 its server. horo-next-webui rebuilds each upstream tag as a wheel that installs
-with pip and works offline, and adds one feature, the agent mind map
-([`overlay/mindmap/`](../overlay/mindmap/)). Every change is in
+with pip and works offline, and adds two features, the agent mind map
+([`overlay/mindmap/`](../overlay/mindmap/)) and the admin policy
+([`overlay/policy/`](../overlay/policy/), below). Every change is in
 [`overlay/horo_overlay.py`](../overlay/horo_overlay.py) and
 [`overlay/vendor_assets.py`](../overlay/vendor_assets.py), with the reason for
 each.
@@ -89,6 +90,25 @@ tested in Chromium with outside requests refused.
 Still present, and run only when a user invokes them: OAuth sign-in to hosted
 model providers, cloud TTS and transcription, the extension gallery, and
 requests to whichever model endpoint is configured.
+
+## Admin policy: governance, not a security boundary
+
+The WebUI refuses to serve without an admin policy, a JSON file the user running
+it cannot write (`$HORO_WEBUI_POLICY`, else `/etc/horo/webui-policy.json`). It
+forces upstream settings, hides tabs, and answers 403 for some feature APIs; a
+missing, unreadable, invalid or user-writable file means 503 for every API but
+login and `/health`, never the last good policy.
+
+Treat it as interface governance only. The WebUI runs under the user's own OS
+account: they control its process, environment and installed packages, and can
+run a copy without this overlay, or use the `horo` / `hermes` CLI directly. The
+permission check (the user must neither own nor be able to write the file or its
+folder) stops the obvious edits, not a determined user. Controls that must hold
+— dangerous tools, automatic approval, outbound traffic — belong to OS
+permissions, a sandbox, network rules and agent-side configuration the admin
+owns. The blocked-feature list covers named path prefixes only; a feature
+upstream adds later is not covered until it is listed. Design and trust model:
+[admin-policy-design.md](admin-policy-design.md).
 
 ## Licenses
 

@@ -49,6 +49,11 @@ python -m pytest tests
 Give a local build its own version so it is never mistaken for a release: edit
 `version` in `pyproject.toml` to e.g. `VERSION+local1`.
 
+The admin policy applies to tests too: without a usable policy every API
+answers 503 and `save_settings` refuses. Give the test run one it cannot write,
+e.g. a root-owned `/etc/horo/webui-policy.json` holding `{"version": 1}`, or
+`HORO_WEBUI_POLICY` naming such a file. A file you own is refused, by design.
+
 Some upstream tests fail against the overlay by design, and a few fail on
 upstream too. Run the untouched sdist once and keep the list of failures as
 your baseline; only a failure outside it is yours. The ones by design assert:
@@ -58,7 +63,8 @@ your baseline; only a failure outside it is yours. The ones by design assert:
 - upstream's launcher: its `bootstrap:main` entry point, its installer, its
   choice of Python, its working directory and port messages;
 - source text the overlay changed, such as `const _INITIAL_MSG_LIMIT` or the
-  boot opening a panel other than the chat;
+  boot opening a panel other than the chat, `def load_settings` (now wrapped by
+  the admin policy) or `_ALWAYS_VISIBLE_TABS` checks in `panels.js`;
 - that every CLI session lookup scans the list: the overlay keeps it for up to
   five seconds, so a test that swaps the scan after another test filled it can
   fail in a full run and pass on its own;

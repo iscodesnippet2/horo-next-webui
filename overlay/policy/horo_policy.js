@@ -23,6 +23,15 @@
   // A panel the policy hides has no way in: rail, shortcut, ?panel= or a button calling switchPanel.
   window._horoPolicyRefusesPanel = (name) => name !== 'chat' && hidesTab(name);
 
+  // Upstream takes hidden_tabs from its localStorage mirror at boot and asks the
+  // server again only on a profile switch or in the settings panel, which the
+  // policy may hide. The server's list already carries the policy's tabs.
+  function applyTabs(hidden){
+    if (!Array.isArray(hidden) || typeof _setHiddenTabs !== 'function' || typeof _applyTabVisibility !== 'function') return;
+    _setHiddenTabs(hidden.filter((x) => typeof x === 'string' && x.trim()));
+    _applyTabVisibility(_getHiddenTabs());
+  }
+
   function rerender(){
     try {
       if (typeof _renderTabVisibilityChips === 'function') _renderTabVisibilityChips();
@@ -33,11 +42,13 @@
     } catch (_e) { /* the next settings load renders again */ }
   }
 
-  function update(view){
+  function update(settings){
+    const view = settings && settings.horo_policy;
     if (!view || view.error) return;
     policy = {path: view.path, settings: view.settings || [], hide_tabs: view.hide_tabs || [],
               block_features: view.block_features || []};
     try { localStorage.setItem(KEY, JSON.stringify(policy)); } catch (_e) {}
+    try { applyTabs(settings.hidden_tabs); } catch (_e) {}
     rerender();
   }
 
@@ -80,7 +91,7 @@
       } catch (_e) {}
     } else if (res.ok && isSettingsGet(url, init, req)) {
       // Before the caller sees the response, so its own rendering already has the locks.
-      try { update((await res.clone().json()).horo_policy); } catch (_e) {}
+      try { update(await res.clone().json()); } catch (_e) {}
     }
     return res;
   };

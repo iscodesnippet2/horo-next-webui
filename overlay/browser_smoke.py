@@ -181,7 +181,8 @@ with tempfile.TemporaryDirectory() as tmp:
         external, errors = [], []
         with sync_playwright() as pw:
             browser = pw.chromium.launch()
-            page = browser.new_page()
+            context = browser.new_context()
+            page = context.new_page()
 
             def on_request(req):
                 host = urlsplit(req.url).hostname
@@ -367,7 +368,7 @@ with tempfile.TemporaryDirectory() as tmp:
             }""")
             policy = page.evaluate(POLICY_PROBE)
             # The first paint, before /api/settings: from the cached policy.
-            early = browser.new_page()
+            early = context.new_page()  # same storage: the cached policy
             early.route(lambda url: urlsplit(url).hostname not in ("127.0.0.1", "localhost"), lambda route: route.abort())
             early.goto(base + "/?panel=settings", wait_until="domcontentloaded")
             first_paint = early.evaluate("""() => [...document.querySelectorAll('[data-panel="settings"]')]
