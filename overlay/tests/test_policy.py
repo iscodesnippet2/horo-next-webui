@@ -106,7 +106,8 @@ class PolicyCase(unittest.TestCase):
 class Loading(PolicyCase):
     def test_minimal_policy_applies(self):
         self.write({"version": 1})
-        self.assertEqual(hp.current()[0], {"settings": {}, "hide_tabs": [], "block_features": []})
+        self.assertEqual(hp.current()[0], {"settings": {}, "hide_tabs": [], "block_features": [],
+                                           "allow_commands": None, "deny_commands": []})
         self.assertIsNone(hp.refusal("/api/settings"))
 
     def test_environment_path_is_read_on_every_call(self):
@@ -301,7 +302,8 @@ class Settings(PolicyCase):
     def test_client_view(self):
         self.write({"version": 1, "settings": {"hide_composer_yolo": True}, "block_features": ["logs"]})
         self.assertEqual(hp.client_view(), {"path": str(self.file), "settings": ["hide_composer_yolo"],
-                                            "hide_tabs": ["logs"], "block_features": ["logs"]})
+                                            "hide_tabs": ["logs"], "block_features": ["logs"],
+                                            "allow_commands": None, "deny_commands": ["yolo"]})
         self.file.unlink()
         self.assertEqual(hp.client_view()["path"], str(self.file))
         self.assertIn("no policy file", hp.client_view()["error"])
@@ -333,6 +335,121 @@ class Refusal(PolicyCase):
                      "/plugins/x.js", "/static/../api/settings", "/healthz", "/api/horo/overview"):
             with self.subTest(path=path):
                 self.assertEqual(hp.refusal(path)[0], 503)
+
+
+class Commands(PolicyCase):
+    def test_absent_key_allows_every_command(self):
+        self.write({"version": 1})
+        policy = hp.current()[0]
+        for name in sorted(hp.COMMANDS) + ["agents", "some-plugin"]:
+            self.assertTrue(hp.command_allowed(policy, name), name)
+        self.assertIsNone(hp.command_refusal("/api/commands/exec", {"command": "/reload-mcp"}))
+        self.assertIsNone(hp.command_refusal("/api/session/yolo", {"session_id": "s"}))
+        self.assertIsNone(hp.refusal("/api/btw"))
+
+    def test_validation(self):
+        for allow, reason in (("help", "list of names"), ([1], "list of names"), (["Help"], "unknown name"),
+                              (["nope"], "unknown name"), (["compact"], "write 'compress'"),
+                              (["use"], "write 'skills'"), (["reload_mcp"], "write 'reload-mcp'"),
+                              (["/model"], "unknown name"), (None, "list of names")):
+            with self.subTest(allow=allow):
+                self.write({"version": 1, "allow_commands": allow})
+                self.assert_refused(reason)
+        self.write({"version": 1, "allow_commands": []})
+        self.assertEqual(hp.current()[0]["allow_commands"], [])
+        self.write({"version": 1, "allow_commands": ["model", "help", "model"]})
+        self.assertEqual(hp.current()[0]["allow_commands"], ["model", "help"])
+
+    def test_allowlist(self):
+        self.write({"version": 1, "allow_commands": ["model", "skills"]})
+        policy = hp.current()[0]
+        for name in ("model", "skills", "use", "help", "HELP"):
+            self.assertTrue(hp.command_allowed(policy, name), name)
+        # Not listed, and not known to this policy at all (a later upstream's command).
+        for name in ("yolo", "compress", "compact", "plugins", "reload-mcp", "agents", "brand-new"):
+            self.assertFalse(hp.command_allowed(policy, name), name)
+        self.write({"version": 1, "allow_commands": []})
+        policy = hp.current()[0]
+        self.assertTrue(hp.command_allowed(policy, "help"))
+        self.assertFalse(hp.command_allowed(policy, "new"))
+
+    def test_dedicated_endpoints_are_refused(self):
+        self.write({"version": 1, "allow_commands": ["new"]})
+        for path, name in (("/api/commands/moa/resolve", "moa"), ("/api/btw", "btw"),
+                           ("/api/background", "background"), ("/api/goal", "goal"),
+                           ("/api/session/compress", "compress"), ("/api/session/compress/start", "compress"),
+                           ("/api/session/retry", "retry"), ("/api/commands/bundles/resolve", "skills"),
+                           ("/API/Goal", "goal"), ("/api/session/../btw", "btw")):
+            with self.subTest(path=path):
+                status, body = hp.refusal(path)
+                self.assertEqual((status, body["horo_policy_blocked_command"]), (403, name))
+        # Shared with the page: never refused for a command's sake.
+        for path in ("/api/background/status", "/api/session/compress/status", "/api/commands",
+                     "/api/commands/bundles", "/api/skills", "/api/skills/content", "/api/session/yolo",
+                     "/api/session/branch", "/api/session/undo", "/api/chat/steer", "/api/session/update",
+                     "/api/chat/start", "/api/approval/respond", "/api/commands/exec"):
+            with self.subTest(path=path):
+                self.assertIsNone(hp.refusal(path))
+        self.write({"version": 1, "allow_commands": list(hp.COMMAND_ENDPOINTS)})
+        for path in ("/api/btw", "/api/goal", "/api/commands/bundles/resolve"):
+            self.assertIsNone(hp.refusal(path))
+
+    def test_exec(self):
+        self.write({"version": 1, "allow_commands": ["reload-skills"]})
+        for command, name in (("/reload-mcp", "reload-mcp"), ("/reload_mcp now", "reload-mcp"),
+                              ("CREDITS", "credits"), ("/codex_runtime on", "codex-runtime"),
+                              ("/my-plugin x", "plugins"), ("/help", "plugins"), ("", "plugins")):
+            with self.subTest(command=command):
+                status, body = hp.command_refusal("/api/commands/exec", {"command": command})
+                self.assertEqual((status, body["horo_policy_blocked_command"]), (403, name))
+        for command in ("/reload-skills", "/reload_skills", " reload-skills "):
+            self.assertIsNone(hp.command_refusal("/api/commands/exec", {"command": command}))
+        self.assertEqual(hp.command_refusal("/api/commands/exec", ["/reload-skills"])[0], 403)
+        self.write({"version": 1, "allow_commands": ["plugins"]})
+        self.assertIsNone(hp.command_refusal("/api/commands/exec", {"command": "/my-plugin"}))
+        self.assertEqual(hp.command_refusal("/api/commands/exec", {"command": "/credits"})[0], 403)
+
+    def test_yolo_may_be_turned_off_never_on(self):
+        self.write({"version": 1, "allow_commands": ["new"]})
+        for path, body in (("/api/session/yolo", {"session_id": "s"}),
+                           ("/api/session/yolo", {"session_id": "s", "enabled": True}),
+                           ("/api/session/yolo", {"session_id": "s", "enabled": "false"}),
+                           ("/api/approval/respond", {"session_id": "s", "choice": "once", "yolo": True})):
+            with self.subTest(body=body):
+                self.assertEqual(hp.command_refusal(path, body)[0], 403)
+        for path, body in (("/api/session/yolo", {"session_id": "s", "enabled": False}),
+                           ("/api/approval/respond", {"session_id": "s", "choice": "once"}),
+                           ("/api/approval/respond", {"session_id": "s", "choice": "once", "yolo": "yes"})):
+            with self.subTest(body=body):
+                self.assertIsNone(hp.command_refusal(path, body))
+
+    def test_hidden_yolo_chip_blocks_yolo(self):
+        self.write({"version": 1, "settings": {"hide_composer_yolo": True}})
+        policy = hp.current()[0]
+        self.assertEqual(policy["deny_commands"], ["yolo"])
+        self.assertFalse(hp.command_allowed(policy, "yolo"))
+        self.assertTrue(hp.command_allowed(policy, "model"))
+        self.assertEqual(hp.command_refusal("/api/session/yolo", {"session_id": "s"})[0], 403)
+        # Even when listed: the hidden chip wins.
+        self.write({"version": 1, "settings": {"hide_composer_yolo": True}, "allow_commands": ["yolo"]})
+        self.assertFalse(hp.command_allowed(hp.current()[0], "yolo"))
+        # The user's own choice to hide the chip blocks nothing.
+        self.write({"version": 1, "settings": {"hide_composer_yolo": False}})
+        self.assertTrue(hp.command_allowed(hp.current()[0], "yolo"))
+
+    def test_moa_on_chat_start(self):
+        self.write({"version": 1, "allow_commands": ["new"]})
+        self.assertEqual(hp.command_refusal("/api/chat/start", {"message": "x", "moa_config": True})[0], 403)
+        self.assertIsNone(hp.command_refusal("/api/chat/start", {"message": "/moa x"}))
+        self.assertIsNone(hp.command_refusal("/api/chat/start", {"message": "x", "moa_config": None}))
+
+    def test_without_a_policy(self):
+        self.assertEqual(hp.command_refusal("/api/session/yolo", {"session_id": "s", "enabled": False})[0], 503)
+
+    def test_client_view(self):
+        self.write({"version": 1, "allow_commands": ["skills", "model"]})
+        view = hp.client_view()
+        self.assertEqual((view["allow_commands"], view["deny_commands"]), (["model", "skills"], []))
 
 
 if __name__ == "__main__":

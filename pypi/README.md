@@ -49,11 +49,12 @@ The user running the WebUI must neither own that file nor be able to write it or
   "version": 1,
   "settings": {"hide_composer_yolo": true, "check_for_updates": false},
   "hide_tabs": ["insights", "settings"],
-  "block_features": ["kanban", "terminal"]
+  "block_features": ["kanban", "terminal"],
+  "allow_commands": ["help", "new", "model", "skills"]
 }
 ```
 
-`settings` forces upstream's own settings, by name; `hide_tabs` hides tabs (never `chat` or `skills`; `settings` may be); `block_features` answers 403 for `kanban`, `tasks`, `memory`, `insights`, `logs`, `terminal`, `mcp` or `extensions` and hides the tab. Changes apply without a restart. A missing, unreadable, invalid or user-writable file is refused, never replaced by the last good one.
+`settings` forces upstream's own settings, by name; `hide_tabs` hides tabs (never `chat` or `skills`; `settings` may be); `block_features` answers 403 for `kanban`, `tasks`, `memory`, `insights`, `logs`, `terminal`, `mcp` or `extensions` and hides the tab; `allow_commands`, when present, lets only the listed slash commands run (`/help` always does; `skills` covers every skill command, `plugins` every plugin command) and without it every command works. Forcing `hide_composer_yolo` also blocks `/yolo`. Changes apply without a restart. A missing, unreadable, invalid or user-writable file is refused, never replaced by the last good one.
 
 It is interface governance, not a security boundary: the WebUI runs as the user, who could run another copy. Enforce what matters (tools, approvals, network) outside the WebUI. Details: [README](https://github.com/iscodesnippet2/horo-next-webui/blob/horo/README.md#admin-policy).
 

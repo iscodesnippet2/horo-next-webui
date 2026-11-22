@@ -561,6 +561,34 @@ edit("static/index.html", '<link rel="stylesheet" href="static/mindmap.css?v=__W
      '<link rel="stylesheet" href="static/horo_policy.css?v=__WEBUI_VERSION__">\n'
      '<script src="static/horo_policy.js?v=__WEBUI_VERSION__"></script>\n')
 
+# K1–K5: slash commands (allow_commands). The server refuses what has an
+# endpoint of its own; send() refuses the rest before anything runs or reaches
+# the agent, and the dropdown and /help leave blocked commands out.
+edit("api/routes.py",
+     '    if not _guard_request_session_visibility(handler, parsed, body=body, method="POST"):\n'
+     '        if diag:\n            diag.finish()\n        return True\n',
+     '    if not _guard_request_session_visibility(handler, parsed, body=body, method="POST"):\n'
+     '        if diag:\n            diag.finish()\n        return True\n'
+     '    from api.horo_policy import command_refusal as _horo_command_refusal\n'
+     '    _horo_refused = _horo_command_refusal(parsed.path, body)\n'
+     '    if _horo_refused:\n'
+     '        if diag:\n            diag.finish()\n'
+     '        return j(handler, _horo_refused[1], status=_horo_refused[0])\n')
+edit("static/commands.js", "function getMatchingCommands(prefix){\n",
+     "// horo-next-webui: the admin policy leaves blocked commands out.\n"
+     "function getMatchingCommands(prefix){\n"
+     "  return _horoUpstreamGetMatchingCommands(prefix).filter(c=>_horoCommandAllowed(c.name,c.source));\n"
+     "}\n"
+     "function _horoUpstreamGetMatchingCommands(prefix){\n")
+edit("static/commands.js", "  const lines=COMMANDS.map(c=>{\n",
+     "  const lines=COMMANDS.filter(c=>_horoCommandAllowed(c.name,'builtin')).map(c=>{\n")
+edit("static/messages.js",
+     "  const _failedSendFilesSnapshot=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];\n",
+     "  const _failedSendFilesSnapshot=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];\n"
+     "  // horo-next-webui: a command the admin policy blocks stops here, busy or not.\n"
+     "  if(text.startsWith('/')&&!literalSlash&&await _horoRefuseBlockedCommand(text))return;\n")
+ok("admin policy: slash commands")
+
 # ── Postconditions ───────────────────────────────────────────────────────
 try:
     from packaging.requirements import Requirement
@@ -613,7 +641,19 @@ for name in ("load_settings", "save_settings"):
     calls = re.findall(rf"(?<![\w.`]){name}\(", config_code)
     if calls:
         fail(f"api/config.py calls {name}() itself ({len(calls)}x): decide which side of the policy it is on")
-for path, marker in (("server.py", "_horo_refusal(parsed.path)"), ("api/routes.py", 'settings["horo_policy"]')):
+# Every command the page runs must be one allow_commands can name, or an
+# admin could never allow it (it is refused either way while it is not).
+sys.path.insert(0, str(POLICY))
+import horo_policy as _hp  # noqa: E402
+_commands_js = (ROOT / "static" / "commands.js").read_text(encoding="utf-8")
+_page_commands = set(re.findall(r"^\s*\{name:'([\w-]+)'", _commands_js.split("const COMMANDS=[", 1)[1].split("];", 1)[0], re.M))
+_page_commands |= set(re.findall(r"'([\w-]+)'", _commands_js.split("_WEBUI_DISPATCHABLE_AGENT_COMMANDS = new Set([", 1)[1].split("]);", 1)[0]))
+_unnamed = sorted(c for c in _page_commands if c not in _hp.COMMANDS and c not in _hp.COMMAND_ALIASES)
+if len(_page_commands) < 30 or _unnamed:
+    fail(f"slash commands the admin policy cannot name: {_unnamed or 'none found'}; add them to policy/horo_policy.py COMMANDS")
+for path, marker in (("server.py", "_horo_refusal(parsed.path)"), ("api/routes.py", 'settings["horo_policy"]'),
+                     ("api/routes.py", "_horo_command_refusal(parsed.path, body)"),
+                     ("static/messages.js", "_horoRefuseBlockedCommand(text)")):
     if marker not in (ROOT / path).read_text(encoding="utf-8"):
         fail(f"{path}: admin policy hook missing")
 

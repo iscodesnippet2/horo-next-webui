@@ -169,7 +169,8 @@ machine. An admin who wants to restrict nothing still installs `{"version": 1}`.
   "version": 1,
   "settings": {"hide_composer_yolo": true, "hide_composer_toolsets": true, "check_for_updates": false},
   "hide_tabs": ["insights", "settings"],
-  "block_features": ["kanban", "terminal"]
+  "block_features": ["kanban", "terminal"],
+  "allow_commands": ["help", "new", "model", "skills"]
 }
 ```
 
@@ -179,6 +180,7 @@ machine. An admin who wants to restrict nothing still installs `{"version": 1}`.
 | `settings` | Forced values for upstream's own settings (`hide_composer_*`, `check_for_updates`, …), by upstream's names and checked against upstream's types. Every reader of settings sees them, the server included; none is ever written to the user's `settings.json`, and the user cannot change them. Not `hidden_tabs`, `tab_order` or the password |
 | `hide_tabs` | Tabs hidden on top of the user's own choice: `mindmap` `memory` `tasks` `kanban` `workspaces` `profiles` `insights` `logs` `todos` `settings`. Never `chat` or `skills`. Only the policy can hide `settings`; a hidden panel has no other way in (shortcut, `?panel=`, buttons) |
 | `block_features` | APIs answering 403, and their tab hidden: `kanban` `tasks` `memory` `insights` `logs` `terminal` `mcp` `extensions` (the path prefixes are in `overlay/policy/horo_policy.py`). Only features the chat, sessions, workspaces and the mind map do not use; each is tested blocked, all at once, in the browser smoke test |
+| `allow_commands` | Slash commands the user may run. **Absent: every command works**, as upstream ships it. Present: only those listed, plus `/help` which always works; every other command, including ones a later upstream adds, shows "此指令已被管理員停用" instead of running or reaching the agent, and leaves the dropdown. Canonical names only (`compress`, not `compact`). `skills` covers `/skills`, `/use`, every `/<skill>` and skill bundle; `plugins` covers every plugin command |
 
 The file is refused — and the WebUI with it — when it is missing, unreadable
 (a share that went away), not valid JSON, names an unknown key, setting, tab or
@@ -186,6 +188,14 @@ feature, has a value of the wrong type, or **when the user running the WebUI own
 it or can write it or its folder**. Root ownership is not required (a share may
 squash root). Nothing falls back to a policy read before. The file is re-read
 when it changes; ownership and write access are checked on every request.
+
+Slash commands are refused by the server where the command has an endpoint of
+its own (`/api/commands/exec`, `/api/btw`, `/api/goal`, MoA, bundles, retry,
+compress), and YOLO cannot be turned on (`/api/session/yolo`, the approval
+card's skip-all). The others — `/model`, `/workspace`, `/undo`, `/branch`,
+`/steer` and the like — share their API with the rest of the page, so only the
+page refuses them. A policy that forces `hide_composer_yolo: true` blocks `/yolo`
+too. The full list: [docs/admin-policy-design.md](docs/admin-policy-design.md) §12.
 
 In the settings panel a locked chip is dashed, marked 🔒 and does nothing.
 Other locked settings (checkboxes) show no lock in v1: the server keeps its value,

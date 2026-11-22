@@ -64,7 +64,9 @@ your baseline; only a failure outside it is yours. The ones by design assert:
   choice of Python, its working directory and port messages;
 - source text the overlay changed, such as `const _INITIAL_MSG_LIMIT` or the
   boot opening a panel other than the chat, `def load_settings` (now wrapped by
-  the admin policy) or `_ALWAYS_VISIBLE_TABS` checks in `panels.js`;
+  the admin policy) or `_ALWAYS_VISIBLE_TABS` checks in `panels.js`; and
+  tests that load `commands.js` or `messages.js` without the page: the policy's
+  `getMatchingCommands`, `/help` and `send()` call `static/horo_policy.js`;
 - that every CLI session lookup scans the list: the overlay keeps it for up to
   five seconds, so a test that swaps the scan after another test filled it can
   fail in a full run and pass on its own;

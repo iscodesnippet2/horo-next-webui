@@ -9,7 +9,8 @@ the browser refuses to import, the version badge reading "unknown", and the
 launcher piping a GitHub installer into bash or creating a venv inside
 site-packages when Hermes Agent is absent. And the admin policy: without a
 usable one every API answers 503, with one its values are forced and kept out
-of settings.json, and blocked features answer 403.
+of settings.json, blocked features answer 403, and so do the endpoints of
+slash commands it does not allow.
 
 Runs outside the source tree with a throwaway HERMES_HOME and a PATH without
 `hermes`, so nothing resolves to a checkout or touches a real ~/.hermes.
@@ -135,7 +136,7 @@ print("JSON" + json.dumps(out))
     policy_file = tmp / "admin" / "webui-policy.json"
     policy_file.parent.mkdir()
     POLICY = {"version": 1, "settings": {"hide_composer_yolo": True}, "hide_tabs": ["settings"],
-              "block_features": ["kanban", "logs"]}
+              "block_features": ["kanban", "logs"], "allow_commands": ["new", "model", "skills", "reload-skills"]}
     write_policy(policy_file, POLICY)
     senv = {**env, "HERMES_WEBUI_HOST": "127.0.0.1", "HERMES_WEBUI_PORT": str(port),
             "HORO_WEBUI_POLICY": str(policy_file)}
@@ -215,7 +216,8 @@ print("JSON" + json.dumps(out))
               "/api/settings returns the policy's values and tabs",
               f"{settings.get('hide_composer_yolo')} {settings.get('hidden_tabs')}")
         check(view == {"path": str(policy_file), "settings": ["hide_composer_yolo"],
-                       "hide_tabs": ["settings", "kanban", "logs"], "block_features": ["kanban", "logs"]},
+                       "hide_tabs": ["settings", "kanban", "logs"], "block_features": ["kanban", "logs"],
+                       "allow_commands": ["model", "new", "reload-skills", "skills"], "deny_commands": ["yolo"]},
               "/api/settings lists what the policy locks", str(view))
         status, _, raw = request("/api/settings", {"hide_composer_yolo": False, "hidden_tabs": ["kanban", "memory"],
                                                    "send_key": "ctrl+enter"})
@@ -238,6 +240,28 @@ print("JSON" + json.dumps(out))
         check(free["/api/sessions"] == 200 and free["/api/session/new"] == 200 and free["/api/session"] == 200
               and not {403, 503} & set(free.values()),
               "sessions, chat and look-alike paths are not blocked", str(free))
+        # Slash commands: allow_commands lists neither /yolo (its chip is hidden too) nor /moa, /btw, …
+        def refused(status: int, raw: bytes, name: str) -> bool:
+            return status == 403 and as_json(raw).get("horo_policy_blocked_command") == name
+        cmd = {"exec /reload-mcp": refused(*request("/api/commands/exec", {"command": "/reload-mcp"})[::2], "reload-mcp"),
+               "exec a plugin": refused(*request("/api/commands/exec", {"command": "/some-plugin"})[::2], "plugins"),
+               "yolo on": refused(*request("/api/session/yolo", {"session_id": sid, "enabled": True})[::2], "yolo"),
+               "approval skip-all": refused(*request("/api/approval/respond", {"session_id": sid, "choice": "once",
+                                                                               "yolo": True})[::2], "yolo"),
+               "moa": refused(*request("/api/commands/moa/resolve")[::2], "moa"),
+               "moa chat": refused(*request("/api/chat/start", {"session_id": sid, "message": "x",
+                                                                "moa_config": True})[::2], "moa"),
+               "btw": refused(*request("/api/btw", {"session_id": sid, "question": "x"})[::2], "btw"),
+               "goal": refused(*request("/api/goal", {"session_id": sid, "text": "x"})[::2], "goal"),
+               "retry": refused(*request("/api/session/retry", {"session_id": sid})[::2], "retry")}
+        check(all(cmd.values()), "a blocked command's endpoint answers 403", str(cmd))
+        open_ = {"exec /reload-skills": request("/api/commands/exec", {"command": "/reload-skills"})[0],
+                 "yolo off": request("/api/session/yolo", {"session_id": sid, "enabled": False})[0],
+                 "background status": request(f"/api/background/status?session_id={sid}")[0],
+                 "bundles": request("/api/commands/bundles/resolve", {"command": "/no-such-bundle"})[0],
+                 "commands": request("/api/commands")[0]}
+        check(open_["yolo off"] == 200 and open_["commands"] == 200 and not {0, 403, 503} & set(open_.values()),
+              "allowed commands and shared endpoints are not refused", str(open_))
         write_policy(policy_file, "{ broken")
         status, _, raw = request("/api/settings")
         err = as_json(raw).get("horo_policy_error", {})

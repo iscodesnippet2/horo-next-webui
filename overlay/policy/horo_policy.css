@@ -34,3 +34,6 @@
 #horoPolicyBlocked dd { margin: 0; font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
 #horoPolicyBlocked .horo-policy-hint { opacity: 0.75; font-size: 0.9em; }
 #horoPolicyBlocked button { margin-top: 8px; padding: 6px 14px; cursor: pointer; }
+
+/* The policy blocks /yolo: the approval card's skip-all turns YOLO on too. */
+.horo-no-yolo #approvalSkipAll { display: none !important; }

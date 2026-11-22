@@ -6,7 +6,8 @@ JSON file the person running the WebUI cannot write:
     {"version": 1,
      "settings": {"hide_composer_yolo": true},
      "hide_tabs": ["kanban", "settings"],
-     "block_features": ["kanban", "terminal"]}
+     "block_features": ["kanban", "terminal"],
+     "allow_commands": ["help", "new", "model", "skills"]}
 
 It is read from $HORO_WEBUI_POLICY, else /etc/horo/webui-policy.json. A policy
 is mandatory: with none, or an unreadable, invalid or user-writable one, every
@@ -36,7 +37,7 @@ ENV = "HORO_WEBUI_POLICY"
 DEFAULT_PATH = "/etc/horo/webui-policy.json"
 MAX_BYTES = 1024 * 1024
 
-TOP_KEYS = {"version", "settings", "hide_tabs", "block_features"}
+TOP_KEYS = {"version", "settings", "hide_tabs", "block_features", "allow_commands"}
 # Tabs the policy may hide. chat and skills never: the chat is the product, and
 # the skills tab is the only way to see what the agent can do.
 HIDEABLE_TABS = {"mindmap", "memory", "tasks", "kanban", "workspaces", "profiles", "insights", "logs",
@@ -64,6 +65,45 @@ FEATURES = {
 OPEN_EXACT = {"/", "/index.html", "/sessions", "/health", "/login", "/favicon.ico", "/sw.js",
               "/manifest.json", "/manifest.webmanifest"}
 OPEN_PREFIXES = ("/static", "/session", "/api/auth")
+
+# Slash commands allow_commands may name, by canonical name. Without the key
+# every command works as upstream ships it; with it only the listed ones do, and
+# every other command the page knows of is refused, including ones a later
+# upstream adds (the build fails until they are listed here, so an admin can
+# allow them). "skills" covers /skills, /use, every /<skill> and every skill
+# bundle; "plugins" covers every plugin-registered command, whose names the
+# policy cannot check.
+COMMANDS = {
+    # WebUI built-ins (static/commands.js COMMANDS)
+    "help", "clear", "compress", "model", "workspace", "terminal", "new", "usage", "theme",
+    "personality", "skills", "stop", "goal", "queue", "interrupt", "steer", "title", "retry",
+    "undo", "btw", "background", "status", "voice", "reasoning", "yolo", "branch",
+    # agent commands the WebUI dispatches itself
+    "reload-mcp", "reload-skills", "codex-runtime", "credits", "moa", "sessions", "pet",
+    "plugins",
+}
+# Other spellings, folded into the name above. The policy must use that name.
+COMMAND_ALIASES = {"compact": "compress", "use": "skills", "resume": "sessions",
+                   "reload_mcp": "reload-mcp", "reload_skills": "reload-skills",
+                   "codex_runtime": "codex-runtime"}
+# /help lists only what may be used; refusing it would leave no way to find out.
+ALWAYS_ALLOWED = {"help"}
+# Agent commands /api/commands/exec runs itself; anything else it is given is a plugin's.
+EXEC_AGENT_COMMANDS = {"reload-mcp", "reload-skills", "codex-runtime", "credits"}
+# Endpoints only a command uses, refused for every method when it is blocked.
+# Shared ones (the session's model and workspace, steering, undo, fork, the
+# skills list) stay open: blocking those commands is the page's alone.
+COMMAND_ENDPOINTS = {
+    "moa": ("/api/commands/moa/resolve",),
+    "btw": ("/api/btw",),
+    "background": ("/api/background",),
+    "goal": ("/api/goal",),
+    "compress": ("/api/session/compress", "/api/session/compress/start"),
+    "retry": ("/api/session/retry",),
+    "skills": ("/api/commands/bundles/resolve",),
+}
+# A forced setting that hides a control also blocks the command doing the same.
+IMPLIED_BLOCKS = {"hide_composer_yolo": "yolo"}
 
 _schema: dict | None = None
 _lock = threading.Lock()
@@ -179,7 +219,15 @@ def validate(data) -> dict:
         tab = FEATURES[feature][1]
         if tab and tab not in hide_tabs:
             hide_tabs.append(tab)
-    return {"settings": copy.deepcopy(settings), "hide_tabs": hide_tabs, "block_features": block}
+    allow = None
+    if "allow_commands" in data:
+        for name in data["allow_commands"] if isinstance(data["allow_commands"], list) else ():
+            if name in COMMAND_ALIASES:
+                raise ValueError(f"allow_commands: write {COMMAND_ALIASES[name]!r}, which covers {name!r}")
+        allow = names("allow_commands", COMMANDS)
+    deny = sorted(cmd for key, cmd in IMPLIED_BLOCKS.items() if settings.get(key) is True)
+    return {"settings": copy.deepcopy(settings), "hide_tabs": hide_tabs, "block_features": block,
+            "allow_commands": allow, "deny_commands": deny}
 
 
 def _report(path: str, error: str | None) -> None:
@@ -288,7 +336,34 @@ def client_view() -> dict:
     if not policy:
         return {"path": path, "error": error}
     return {"path": path, "settings": sorted(policy["settings"]), "hide_tabs": list(policy["hide_tabs"]),
-            "block_features": list(policy["block_features"])}
+            "block_features": list(policy["block_features"]),
+            "allow_commands": None if policy["allow_commands"] is None else sorted(policy["allow_commands"]),
+            "deny_commands": list(policy["deny_commands"])}
+
+
+def command_allowed(policy: dict, name: str) -> bool:
+    """Whether the policy lets the user run this command (canonical or alias name)."""
+    name = str(name or "").strip().lower()
+    name = COMMAND_ALIASES.get(name, name)
+    if name in ALWAYS_ALLOWED:
+        return True
+    if name in policy["deny_commands"]:
+        return False
+    return policy["allow_commands"] is None or name in policy["allow_commands"]
+
+
+def _command_blocked(name: str) -> tuple:
+    return 403, {"error": f"The admin policy does not allow the /{name} command.",
+                 "horo_policy_blocked_command": name}
+
+
+def _exec_command_name(command) -> str:
+    """The policy name /api/commands/exec would run: an agent command, else a plugin's."""
+    text = str(command or "").strip()
+    parts = (text[1:] if text.startswith("/") else text).split(maxsplit=1)
+    name = parts[0].lower() if parts else ""
+    name = COMMAND_ALIASES.get(name, name)
+    return name if name in EXEC_AGENT_COMMANDS else "plugins"
 
 
 def _under(path: str, prefix: str) -> bool:
@@ -318,4 +393,36 @@ def refusal(path: str):
     for feature in policy["block_features"]:
         if any(_under(p, pre) for p in forms for pre in FEATURES[feature][0]):
             return 403, {"error": f"Blocked by the admin policy ({feature}).", "horo_policy_blocked": feature}
+    for name, paths in COMMAND_ENDPOINTS.items():
+        if forms & set(paths) and not command_allowed(policy, name):
+            return _command_blocked(name)
+    return None
+
+
+def command_refusal(path: str, body):
+    """(status, body) for a POST whose body asks for a blocked command, else None.
+
+    Called by handle_post once the body is read, after refusal() let the path
+    through. What a shared endpoint does depends on its body: /api/session/yolo
+    may turn YOLO off, never on; the approval card's skip-all is /yolo too.
+    """
+    policy, error, policy_file = current()
+    if not policy:
+        return 503, {"error": f"The WebUI is unavailable: the admin policy {policy_file} cannot be used "
+                              f"({error}). Contact your administrator.",
+                     "horo_policy_error": {"path": policy_file, "reason": error}}
+    body = body if isinstance(body, dict) else {}
+    path = posixpath.normpath("/" + path.casefold().lstrip("/"))
+    if path == "/api/commands/exec":
+        name = _exec_command_name(body.get("command"))
+    elif path == "/api/session/yolo":
+        name = "yolo" if bool(body.get("enabled", True)) else None
+    elif path == "/api/approval/respond":
+        name = "yolo" if body.get("yolo") is True else None
+    elif path in ("/api/chat/start", "/api/chat"):
+        name = "moa" if body.get("moa_config") else None
+    else:
+        name = None
+    if name and not command_allowed(policy, name):
+        return _command_blocked(name)
     return None

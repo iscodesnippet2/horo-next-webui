@@ -82,7 +82,8 @@ admin 不想限制任何東西時，也要放一份只有 `{"version": 1}` 的�
     "check_for_updates": false
   },
   "hide_tabs": ["kanban", "logs", "insights", "settings"],
-  "block_features": ["kanban", "terminal"]
+  "block_features": ["kanban", "terminal"],
+  "allow_commands": ["help", "new", "model", "skills"]
 }
 ```
 
@@ -92,6 +93,7 @@ admin 不想限制任何東西時，也要放一份只有 `{"version": 1}` 的�
 | `settings` | 強制值。鍵必須在上游 `_SETTINGS_ALLOWED_KEYS` 內，且不能是 `hidden_tabs`、`tab_order`、`password_hash`、`_set_password` 等。強制值會影響所有讀 `load_settings()` 的地方，包括伺服器端的行為（例如 `check_for_updates`、`api_redact_enabled`） |
 | `hide_tabs` | 強制隱藏的分頁，與使用者自己隱藏的取聯集。**`chat`、`skills` 不可列入**；`settings` 可以。可用名稱：`mindmap` `memory` `tasks` `kanban` `workspaces` `profiles` `insights` `logs` `todos` `settings` |
 | `block_features` | 封鎖該功能的 API（403），並自動加入 `hide_tabs`。只接受第 5 節表格裡的名稱 |
+| `allow_commands` | slash 指令白名單（第 12 節）。**沒有這個鍵**：所有指令照上游行為；**有這個鍵**：只有列出的指令（和永遠可用的 `/help`）能用 |
 
 使用者自己能隱藏哪些分頁維持上游行為（不能藏 `chat`、`settings`）：只有 admin 能藏 `settings`，使用者不會把自己鎖在設定頁外。
 
@@ -272,3 +274,57 @@ v1 的限制：`settings` 裡不是 chip 的鍵（例如 `check_for_updates` 的
   - `verify_wheel.py`、`browser_smoke.py` 透過 `overlay/policy_fixture.py` 的 launcher 啟動 server：權限檢查**只對 fixture 那一個路徑**放行，內容驗證、mtime 重讀與其他路徑都走真實邏輯。`verify_wheel.py` 另外用一般方式（無例外）啟動第二個 server，確認沒有 policy 時 503、使用者自己擁有的 policy 被拒。產品本身沒有任何略過權限檢查的開關。
 - **`block_features` 第一批**：八項（kanban、tasks、memory、insights、logs、terminal、mcp、extensions）全部保留。browser smoke 讓八項同時封鎖，聊天、session、workspace、mind map 的既有檢查全部通過，頁面也沒有未捕捉的錯誤，沒有需要拿掉的項目。
 - **第 6 節「上游套用流程大致不必修改」不成立**：上游 boot 時只從 localStorage 讀 `hidden_tabs`，只在切換 profile 或打開 settings 面板時才向伺服器校正；settings 被 policy 藏起來時就永遠不會校正。`horo_policy.js` 在攔截到 GET `/api/settings` 時，用伺服器回傳的 `hidden_tabs`（已含 policy 分頁）更新 mirror 並套用。
+
+## 12. Slash 指令（`allow_commands`）
+
+### 規則
+
+- **沒有 `allow_commands` 鍵**：所有指令照上游行為，已部署的 policy 檔不必改。這個預設是實作時訂的，使用者沒有選過，請確認。
+- **有這個鍵**：只有列出的指令能用。其他指令一律停用，包括頁面認得、但 policy 無法列出的指令（例如 agent registry 裡 WebUI 不分派的 `/agents`），以及上游日後新增的指令。
+- **名稱嚴格檢查**，比照 `hide_tabs`：必須是字串清單，每個名稱都要在 `horo_policy.COMMANDS` 裡（小寫、canonical 名稱）。別名會被拒絕並提示正確名稱：`compact`→`compress`、`use`→`skills`、`resume`→`sessions`、`reload_mcp`→`reload-mcp` 等。不認得的名稱讓整份 policy 失效（503）。
+  - 選擇「拒絕」而不是「接受並忽略」的理由：和其他鍵一致；打錯字會在部署當下就看到原因，不會默默停掉一個 admin 以為有開的指令。代價是：為新版寫的 policy（列了舊版沒有的指令）放到舊版 WebUI 會 503。
+- **`/help` 永遠可用**，列不列都一樣。它只列出允許的指令；停用它，使用者就無從得知哪些能用。
+- **`skills` 是總開關**：涵蓋 `/skills`、`/use`、每個 `/<skill>` 和每個 skill bundle（bundle 和 skill 指令走同一套 slug 規則，同一個 dropdown，所以合併處理）。不提供個別 skill 名稱。
+- **`plugins` 是總開關**：涵蓋所有 plugin 註冊的指令。plugin 名稱是執行期才知道的，policy 無法嚴格檢查，所以不逐一列名。
+- **build 檢查**：overlay 的 postcondition 從 `static/commands.js` 讀出 `COMMANDS` 與 `_WEBUI_DISPATCHABLE_AGENT_COMMANDS`，任何不在 `horo_policy.COMMANDS`（含別名）的名稱都會讓 build 失敗。新指令在執行期本來就被白名單擋下；這個檢查是確保 admin 有辦法開放它。
+
+### `hide_composer_*` 是否連帶停用指令
+
+實作：**policy 強制 `hide_composer_yolo: true` 時，`/yolo` 一律停用**，就算 `allow_commands` 列了 `yolo` 或沒有這個鍵。這補上了原本的缺口：藏了 YOLO 按鈕，打 `/yolo` 仍能開 YOLO。使用者自己在設定裡藏 chip 不影響。
+
+建議但未實作：`hide_composer_model`→`/model`、`hide_composer_workspace`→`/workspace`、`hide_composer_reasoning`→`/reasoning`、`hide_composer_voice_mode`／`hide_composer_mic`→`/voice`。這幾個 chip 可能只是為了版面簡潔而藏，連帶停用指令會改變既有 policy 的效果；admin 要停用它們可以用 `allow_commands`。
+
+### 在哪裡擋
+
+**伺服器端（403，`horo_policy_blocked_command`）**，只擋指令專用、或由 body 可判斷的請求：
+
+| 指令 | 拒絕的請求 |
+|---|---|
+| `reload-mcp` `reload-skills` `codex-runtime` `credits` | POST `/api/commands/exec`，依 `command` 的名稱（含 `_` 別名） |
+| `plugins` | POST `/api/commands/exec`，名稱不是上面四個 agent 指令 |
+| `skills` | `/api/commands/bundles/resolve` |
+| `yolo` | POST `/api/session/yolo` 且 `enabled` 不是 false（關掉 YOLO 一律允許）；POST `/api/approval/respond` 且 `yolo: true`（approval 卡片的「略過全部」） |
+| `moa` | `/api/commands/moa/resolve`；POST `/api/chat/start`、`/api/chat` 帶 `moa_config` |
+| `btw` | `/api/btw` |
+| `background` | `/api/background`（不含 `/api/background/status`） |
+| `goal` | `/api/goal` |
+| `compress` | `/api/session/compress`、`/api/session/compress/start`（不含 `/status`） |
+| `retry` | `/api/session/retry` |
+
+路徑以 `refusal()` 處理（任何 method、casefold 與正規化後的形式），body 相關的由 `command_refusal(path, body)` 處理，掛在 `handle_post` 讀完 body、通過 session 可見性檢查之後（anchor K1）。policy 無法使用時同樣回 503。
+
+**只在前端擋**（API 和一般介面共用，伺服器端擋了會弄壞聊天）：`clear` `new` `model` `workspace` `personality` `reasoning` `theme` `usage` `status` `voice` `title` `stop` `steer` `interrupt` `queue` `undo` `branch` `sessions` `pet` `terminal`，以及 `skills` 的 `/skills`、`/use`、`/<skill>`（`/api/skills` 是 skills 分頁要用的；`/<skill>` 在 WebUI 只是送給 agent 的純文字，沒有伺服器端展開）。`terminal` 的 API 由 `block_features: terminal` 擋。注意：停用 `/undo`、`/branch` 不會拿掉訊息上的「復原」「分支」按鈕。
+
+### 前端
+
+- `getMatchingCommands`（K2）改名為 `_horoUpstreamGetMatchingCommands`，新的同名函式過濾掉停用的指令。來源標記決定 policy 名稱：`skill`、`bundle`→`skills`，`plugin`→`plugins`，其他用名稱加別名對照。
+- `send()`（K4）在任何指令執行前、也在 busy 分支之前呼叫 `_horoRefuseBlockedCommand(text)`：認得的指令（內建、agent registry 含別名、plugin，以及 `skills` 被停用時的 skill 與 bundle）若被停用，就在本地加上使用者訊息與「此指令已被管理員停用：`/名稱`」，清空輸入框，不送給 agent。認不得的（例如 `/etc/hosts`）照常送出。`literalSlash` 送出（以純文字送出）不受影響。
+- 前端還沒有 policy（或快取是舊格式）時，先 GET `/api/settings`；仍然拿不到就拒絕認得的指令。
+- `/help`（K3）只列允許的內建指令。
+- `/yolo` 停用時，`<html>` 加上 `horo-no-yolo`，approval 卡片的「略過全部」（`#approvalSkipAll`）隱藏。
+
+### 測試
+
+- `test_policy.py` 的 `Commands`：鍵不存在、驗證（別名、大小寫、非清單）、白名單、指令專用 endpoint 與共用 endpoint、`/api/commands/exec`、YOLO 只能關不能開、`hide_composer_yolo` 連帶停用、`moa_config`、沒有 policy、client view。
+- `verify_wheel.py`：真 server 上，被停用指令的 endpoint 回 403 並帶指令名；允許的指令與共用 endpoint 不受影響。
+- `browser_smoke.py`：dropdown 只剩允許的指令；被停用的內建指令、skill、bundle、別名在一般與 busy 狀態下都顯示管理員訊息，不發出任何 chat 或指令請求；`/help` 只列允許的；`/etc/hosts` 等照常送出；`#approvalSkipAll` 隱藏。

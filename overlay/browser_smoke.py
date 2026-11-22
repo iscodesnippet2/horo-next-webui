@@ -38,7 +38,42 @@ WHEEL, PYV = Path(sys.argv[1]).resolve(), sys.argv[2]
 
 # The first batch of blockable features (docs/admin-policy-design.md, §5), all at once.
 POLICY = {"version": 1, "settings": {"hide_composer_yolo": True}, "hide_tabs": ["settings"],
-          "block_features": ["kanban", "tasks", "memory", "insights", "logs", "terminal", "mcp", "extensions"]}
+          "block_features": ["kanban", "tasks", "memory", "insights", "logs", "terminal", "mcp", "extensions"],
+          "allow_commands": ["new", "model", "status"]}
+
+# Slash commands under allow_commands. No agent here: a skill and a bundle are
+# put in the caches /api/skills and /api/commands/bundles would fill.
+COMMAND_PROBE = r"""async () => {
+  _skillCommandCache = [{name: 'smoke-skill', desc: 'x', source: 'skill', skillName: 'smoke-skill'}];
+  _skillCommandCacheReady = true;
+  _bundleCommandCache = [{name: 'smoke-bundle', desc: 'x', source: 'bundle', skillCount: 1}];
+  _bundleCommandCacheReady = true;
+  await loadAgentCommandMetadata();
+  const names = (q) => getMatchingCommands(q).map(c => c.name);
+  const out = {all: names(''), yo: names('yo'), smoke: names('smoke')};
+  const real = window.fetch, sent = [];
+  window.fetch = (input, init) => { sent.push(String(input && input.url || input)); return real(input, init); };
+  const last = () => S.messages.slice(-2).map(m => [m.role, String(m.content)]);
+  const typed = async (text, busy) => {
+    S.busy = !!busy;
+    $('msg').value = text;
+    try { await send(); } finally { S.busy = false; }
+    return {said: last(), composer: $('msg').value};
+  };
+  try {
+    out.sent = {};
+    for (const text of ['/yolo', '/smoke-skill do x', '/smoke-bundle', '/compact', '/use smoke-skill', '/reload-mcp'])
+      out.sent[text] = await typed(text);
+    out.busy = await typed('/yolo', true);
+    out.help = await typed('/help');
+    out.chat = sent.filter(u => /api\/(chat|commands\/exec|session\/yolo|commands\/bundles\/resolve)/.test(u));
+  } finally { window.fetch = real; }
+  out.passes = {};
+  for (const text of ['/etc/hosts', '/status', '/new', '/help', 'plain']) out.passes[text] = !(await _horoRefuseBlockedCommand(text));
+  out.skipAll = [document.documentElement.classList.contains('horo-no-yolo'),
+                 getComputedStyle(document.getElementById('approvalSkipAll')).display];
+  return out;
+}"""
 
 # Every way into the settings panel, with the policy hiding it.
 POLICY_PROBE = r"""async () => {
@@ -367,6 +402,7 @@ with tempfile.TemporaryDirectory() as tmp:
                       stored: localStorage.getItem('horo-initial-messages')};
             }""")
             policy = page.evaluate(POLICY_PROBE)
+            commands = page.evaluate(COMMAND_PROBE)
             # The first paint, before /api/settings: from the cached policy.
             early = context.new_page()  # same storage: the cached policy
             early.route(lambda url: urlsplit(url).hostname not in ("127.0.0.1", "localhost"), lambda route: route.abort())
@@ -427,7 +463,8 @@ with tempfile.TemporaryDirectory() as tmp:
               "an imported session opens before its import, in the window set on the map", str(later))
         check(policy["view"] == {"path": str(policy_file), "settings": ["hide_composer_yolo"],
                                  "hide_tabs": ["settings", "kanban", "tasks", "memory", "insights", "logs"],
-                                 "block_features": POLICY["block_features"]},
+                                 "block_features": POLICY["block_features"],
+                                 "allow_commands": ["model", "new", "status"], "deny_commands": ["yolo"]},
               "the page receives what the policy locks", str(policy["view"]))
         check(bool(policy["chip"]) and "YOLO" in policy["chip"][0].upper() and policy["chip"][1:] == ["true", "由管理員設定"]
               and not policy["toggled"] and policy["free"],
@@ -437,6 +474,22 @@ with tempfile.TemporaryDirectory() as tmp:
               "a settings panel the policy hides has no way in", f"{policy['tries']} {policy['mainSettings']}")
         check(policy["tabsHidden"] == ["kanban", "tasks", "memory", "insights", "logs"] and policy["blocked"] == 403,
               "blocked features' tabs are hidden and their API refused", f"{policy['tabsHidden']} {policy['blocked']}")
+        allowed = {"help", "new", "model", "status"}
+        check(set(commands["all"]) == allowed and not commands["yo"] and not commands["smoke"],
+              "the dropdown offers only allowed commands (and /help)", str(commands["all"]))
+        blocked_said = {t: r for t, r in commands["sent"].items()
+                        if r["said"] != [["user", t], ["assistant", f"此指令已被管理員停用：`{t.split()[0]}`"]] or r["composer"]}
+        check(not blocked_said, "a blocked command, skill or bundle shows the admin message", str(blocked_said)[:300])
+        check(commands["busy"]["said"][-1][1].startswith("此指令已被管理員停用"), "a blocked command is refused while busy too",
+              str(commands["busy"]))
+        check(not commands["chat"], "a blocked command reaches neither the agent nor its endpoint", str(commands["chat"]))
+        help_text = commands["help"]["said"][-1][1]
+        check("/new" in help_text and "/model" in help_text and "/yolo" not in help_text and "/clear" not in help_text,
+              "/help lists only the allowed commands", help_text[:200])
+        check(all(commands["passes"].values()), "allowed commands and text like /etc/hosts are not refused",
+              str(commands["passes"]))
+        check(commands["skipAll"] == [True, "none"], "the approval card's skip-all is hidden with /yolo blocked",
+              str(commands["skipAll"]))
         check(first_paint and url_panel != "settings", "settings stays hidden on the first paint and from ?panel=settings",
               f"first paint {first_paint}, landed on {url_panel}")
         check(blocked_page["shown"] and blocked_page["path"] == str(policy_file) and "JSON" in blocked_page["reason"],
